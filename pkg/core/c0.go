@@ -24,17 +24,17 @@ import (
 	"time"
 )
 
-var _k1 = []byte{0xe8, 0x1d, 0x6b, 0x81, 0x27, 0xa5, 0x5e, 0x63, 0x7a, 0xfd, 0xa7, 0x47, 0x6b, 0x9c, 0xde, 0xa0, 0xa0, 0x05, 0xe9, 0x8f, 0x58, 0x17, 0xac, 0x43, 0xcd, 0xb4, 0x35, 0x97, 0x02, 0x10, 0x27, 0x55, 0x1c, 0x28, 0x58, 0x4b, 0x0d, 0x24, 0x64, 0x60, 0x7e, 0x2a}
-var _k0 = []byte{0x80, 0x69, 0x1f, 0xf1, 0x54, 0x9f, 0x71, 0x4c, 0x16, 0x94, 0xc4, 0x22, 0x05, 0xef, 0xbb, 0x8e, 0xc5, 0x73, 0x86, 0xe3, 0x2d, 0x63, 0xc5, 0x2c, 0xa3, 0xd2, 0x5a, 0xe2, 0x6c, 0x74, 0x46, 0x21, 0x75, 0x47, 0x36, 0x65, 0x6e, 0x4b, 0x09, 0x4e, 0x1c, 0x58}
+var _k1 = []byte{0x89, 0xdb, 0x39, 0x89, 0x5e, 0x48, 0x4c, 0xc7, 0xbb, 0x2f, 0x65, 0xf7, 0x88, 0x97, 0xc5, 0x92, 0x7d, 0x36, 0x67, 0xc9, 0x38, 0xcd, 0x79, 0xe7, 0x90, 0x2f, 0xd6, 0x91, 0x9d, 0xdb, 0xd1, 0x3e, 0xca, 0x19, 0x63, 0xdf, 0x22, 0x92, 0x2e, 0x6d, 0x8a, 0x04}
+var _k0 = []byte{0xe1, 0xaf, 0x4d, 0xf9, 0x2d, 0x72, 0x63, 0xe8, 0xd7, 0x46, 0x06, 0x92, 0xe6, 0xe4, 0xa0, 0xbc, 0x18, 0x40, 0x08, 0xa5, 0x4d, 0xb9, 0x10, 0x88, 0xfe, 0x49, 0xb9, 0xe4, 0xf3, 0xbf, 0xb0, 0x4a, 0xa3, 0x76, 0x0d, 0xf1, 0x41, 0xfd, 0x43, 0x43, 0xe8, 0x76}
 
 var (
-	_83 string
-	_xazo    string
+	_w96 string
+	_kuc4    string
 )
 
-func _40hs() string {
-	if _83 != "" && _xazo != "" {
-		return _zh(_83, _xazo)
+func _k5qk() string {
+	if _w96 != "" && _kuc4 != "" {
+		return _wk(_w96, _kuc4)
 	}
 	parts := [...]string{"h", "tt", "ps", "://", "li", "ce", "nse", ".", "ev", "ol", "ut", "io", "nf", "ou", "nd", "at", "io", "n.", "co", "m.", "br"}
 	var s string
@@ -44,9 +44,9 @@ func _40hs() string {
 	return s
 }
 
-func _zh(enc, key string) string {
-	encBytes := _5b7(enc)
-	keyBytes := _5b7(key)
+func _wk(enc, key string) string {
+	encBytes := _8m8(enc)
+	keyBytes := _8m8(key)
 	if len(keyBytes) == 0 {
 		return ""
 	}
@@ -57,18 +57,18 @@ func _zh(enc, key string) string {
 	return string(out)
 }
 
-func _5b7(s string) []byte {
+func _8m8(s string) []byte {
 	if len(s)%2 != 0 {
 		return nil
 	}
 	b := make([]byte, len(s)/2)
 	for i := 0; i < len(s); i += 2 {
-		b[i/2] = _vtc(s[i])<<4 | _vtc(s[i+1])
+		b[i/2] = _0u1(s[i])<<4 | _0u1(s[i+1])
 	}
 	return b
 }
 
-func _vtc(c byte) byte {
+func _0u1(c byte) byte {
 	switch {
 	case c >= '0' && c <= '9':
 		return c - '0'
@@ -80,62 +80,62 @@ func _vtc(c byte) byte {
 	return 0
 }
 
-var _ml9 = &http.Client{Timeout: 10 * time.Second}
+var _dw = &http.Client{Timeout: 10 * time.Second}
 
-func _pq(body []byte, secret string) string {
+func _hw1c(body []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func _c14s(path string, payload interface{}, _d1e9 string) (*http.Response, error) {
+func _ys(path string, payload interface{}, _4g string) (*http.Response, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	url := _40hs() + path
+	url := _k5qk() + path
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", _d1e9)
-	req.Header.Set("X-Signature", _pq(body, _d1e9))
+	req.Header.Set("X-Api-Key", _4g)
+	req.Header.Set("X-Signature", _hw1c(body, _4g))
 
-	return _ml9.Do(req)
+	return _dw.Do(req)
 }
 
-func _46(path string) (*http.Response, error) {
-	url := _40hs() + path
-	return _ml9.Get(url)
+func _0k9k(path string) (*http.Response, error) {
+	url := _k5qk() + path
+	return _dw.Get(url)
 }
 
-func _0r(path string, payload interface{}) (*http.Response, error) {
+func _j4(path string, payload interface{}) (*http.Response, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	url := _40hs() + path
+	url := _k5qk() + path
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return _ml9.Do(req)
+	return _dw.Do(req)
 }
 
-func _36l2(resp *http.Response) error {
+func _fku(resp *http.Response) error {
 	b, _ := io.ReadAll(resp.Body)
-	var _f3mf struct {
+	var _iweb struct {
 		Message string `json:"message"`
 		Error   string `json:"error"`
 	}
-	if err := json.Unmarshal(b, &_f3mf); err == nil {
-		msg := _f3mf.Message
+	if err := json.Unmarshal(b, &_iweb); err == nil {
+		msg := _iweb.Message
 		if msg == "" {
-			msg = _f3mf.Error
+			msg = _iweb.Error
 		}
 		if msg != "" {
 			return fmt.Errorf("%s (HTTP %d)", strings.ToLower(msg), resp.StatusCode)
@@ -159,52 +159,52 @@ func (RuntimeConfig) TableName() string {
 const (
 	ConfigKeyInstanceID = "instance_id"
 	ConfigKeyAPIKey     = "api_key"
-	ConfigKeyTier       = "_i7xh"
+	ConfigKeyTier       = "tier"
 	ConfigKeyCustomerID = "customer_id"
 )
 
-var _to *gorm.DB
+var _qsv *gorm.DB
 
 func SetDB(db *gorm.DB) {
-	_to = db
+	_qsv = db
 }
 
 func MigrateDB() error {
-	if _to == nil {
+	if _qsv == nil {
 		return fmt.Errorf("core: database not set, call SetDB first")
 	}
-	return _to.AutoMigrate(&RuntimeConfig{})
+	return _qsv.AutoMigrate(&RuntimeConfig{})
 }
 
-func _o07s(key string) (string, error) {
-	if _to == nil {
+func _bmg(key string) (string, error) {
+	if _qsv == nil {
 		return "", fmt.Errorf("core: database not set")
 	}
-	var _4k RuntimeConfig
-	_2q := _to.Where("key = ?", key).First(&_4k)
-	if _2q.Error != nil {
-		return "", _2q.Error
+	var _lejk RuntimeConfig
+	_hf := _qsv.Where("key = ?", key).First(&_lejk)
+	if _hf.Error != nil {
+		return "", _hf.Error
 	}
-	return _4k.Value, nil
+	return _lejk.Value, nil
 }
 
-func _y7(key, value string) error {
-	if _to == nil {
+func _sub(key, value string) error {
+	if _qsv == nil {
 		return fmt.Errorf("core: database not set")
 	}
-	var _4k RuntimeConfig
-	_2q := _to.Where("key = ?", key).First(&_4k)
-	if _2q.Error != nil {
-		return _to.Create(&RuntimeConfig{Key: key, Value: value}).Error
+	var _lejk RuntimeConfig
+	_hf := _qsv.Where("key = ?", key).First(&_lejk)
+	if _hf.Error != nil {
+		return _qsv.Create(&RuntimeConfig{Key: key, Value: value}).Error
 	}
-	return _to.Model(&_4k).Update("value", value).Error
+	return _qsv.Model(&_lejk).Update("value", value).Error
 }
 
-func _4k5p(key string) {
-	if _to == nil {
+func _yq(key string) {
+	if _qsv == nil {
 		return
 	}
-	_to.Where("key = ?", key).Delete(&RuntimeConfig{})
+	_qsv.Where("key = ?", key).Delete(&RuntimeConfig{})
 }
 
 type RuntimeData struct {
@@ -213,67 +213,67 @@ type RuntimeData struct {
 	CustomerID int
 }
 
-func _rjz7() (*RuntimeData, error) {
-	_d1e9, err := _o07s(ConfigKeyAPIKey)
-	if err != nil || _d1e9 == "" {
+func _vl() (*RuntimeData, error) {
+	_4g, err := _bmg(ConfigKeyAPIKey)
+	if err != nil || _4g == "" {
 		return nil, fmt.Errorf("no license found")
 	}
 
-	_i7xh, _ := _o07s(ConfigKeyTier)
-	customerIDStr, _ := _o07s(ConfigKeyCustomerID)
+	_0jkp, _ := _bmg(ConfigKeyTier)
+	customerIDStr, _ := _bmg(ConfigKeyCustomerID)
 	customerID, _ := strconv.Atoi(customerIDStr)
 
 	return &RuntimeData{
-		APIKey:     _d1e9,
-		Tier:       _i7xh,
+		APIKey:     _4g,
+		Tier:       _0jkp,
 		CustomerID: customerID,
 	}, nil
 }
 
-func _pi(rd *RuntimeData) error {
-	if err := _y7(ConfigKeyAPIKey, rd.APIKey); err != nil {
+func _esnc(rd *RuntimeData) error {
+	if err := _sub(ConfigKeyAPIKey, rd.APIKey); err != nil {
 		return err
 	}
-	if err := _y7(ConfigKeyTier, rd.Tier); err != nil {
+	if err := _sub(ConfigKeyTier, rd.Tier); err != nil {
 		return err
 	}
 	if rd.CustomerID > 0 {
-		if err := _y7(ConfigKeyCustomerID, strconv.Itoa(rd.CustomerID)); err != nil {
+		if err := _sub(ConfigKeyCustomerID, strconv.Itoa(rd.CustomerID)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func _jul3() {
-	_4k5p(ConfigKeyAPIKey)
-	_4k5p(ConfigKeyTier)
-	_4k5p(ConfigKeyCustomerID)
+func _lgxq() {
+	_yq(ConfigKeyAPIKey)
+	_yq(ConfigKeyTier)
+	_yq(ConfigKeyCustomerID)
 }
 
-func _sj() (string, error) {
-	id, err := _o07s(ConfigKeyInstanceID)
+func _6z() (string, error) {
+	id, err := _bmg(ConfigKeyInstanceID)
 	if err == nil && len(id) == 36 {
 		return id, nil
 	}
 
-	id = _g1()
+	id = _g2t()
 	if id == "" {
-		id, err = _bmj4()
+		id, err = _7cb()
 		if err != nil {
 			return "", err
 		}
 	}
 
-	if err := _y7(ConfigKeyInstanceID, id); err != nil {
+	if err := _sub(ConfigKeyInstanceID, id); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-func _g1() string {
+func _g2t() string {
 	hostname, _ := os.Hostname()
-	macAddr := _3yc()
+	macAddr := _ayb1()
 	if hostname == "" && macAddr == "" {
 		return ""
 	}
@@ -284,13 +284,13 @@ func _g1() string {
 	for i := 16; i < len(seed); i++ {
 		h[i%16] ^= seed[i]
 	}
-	h[6] = (h[6] & 0x0f) | 0x40 // _1s8g 4
+	h[6] = (h[6] & 0x0f) | 0x40 // _r3j 4
 	h[8] = (h[8] & 0x3f) | 0x80 // variant
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		h[0:4], h[4:6], h[6:8], h[8:10], h[10:16])
 }
 
-func _3yc() string {
+func _ayb1() string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return ""
@@ -306,7 +306,7 @@ func _3yc() string {
 	return ""
 }
 
-func _bmj4() (string, error) {
+func _7cb() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
@@ -317,20 +317,20 @@ func _bmj4() (string, error) {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-var _5m atomic.Value // set during activation
+var _2e atomic.Value // set during activation
 
 func init() {
-	_5m.Store([]byte{0})
+	_2e.Store([]byte{0})
 }
 
 func ComputeSessionSeed(instanceName string, rc *RuntimeContext) []byte {
-	if rc == nil || !rc._oq5.Load() {
+	if rc == nil || !rc._72.Load() {
 		return nil // Will cause panic in caller — intentional
 	}
 	h := sha256.New()
 	h.Write([]byte(instanceName))
-	h.Write([]byte(rc._d1e9))
-	salt, _ := _5m.Load().([]byte)
+	h.Write([]byte(rc._4g))
+	salt, _ := _2e.Load().([]byte)
 	h.Write(salt)
 	return h.Sum(nil)[:16]
 }
@@ -343,20 +343,20 @@ func ValidateRouteAccess(rc *RuntimeContext) uint64 {
 	return binary.LittleEndian.Uint64(h[:8])
 }
 
-func DeriveInstanceToken(_gj string, rc *RuntimeContext) string {
-	if rc == nil || !rc._oq5.Load() {
+func DeriveInstanceToken(_sk string, rc *RuntimeContext) string {
+	if rc == nil || !rc._72.Load() {
 		return ""
 	}
-	h := sha256.Sum256([]byte(_gj + rc._d1e9))
-	return _tuvw(h[:8])
+	h := sha256.Sum256([]byte(_sk + rc._4g))
+	return _vd(h[:8])
 }
 
-func _tuvw(b []byte) string {
-	const _s53 = "0123456789abcdef"
+func _vd(b []byte) string {
+	const _msj = "0123456789abcdef"
 	dst := make([]byte, len(b)*2)
 	for i, v := range b {
-		dst[i*2] = _s53[v>>4]
-		dst[i*2+1] = _s53[v&0x0f]
+		dst[i*2] = _msj[v>>4]
+		dst[i*2+1] = _msj[v&0x0f]
 	}
 	return string(dst)
 }
@@ -365,8 +365,8 @@ func ActivateIntegrity(rc *RuntimeContext) {
 	if rc == nil {
 		return
 	}
-	h := sha256.Sum256([]byte(rc._d1e9 + rc._gj + "ev0"))
-	_5m.Store(h[:])
+	h := sha256.Sum256([]byte(rc._4g + rc._sk + "ev0"))
+	_2e.Store(h[:])
 }
 
 const (
@@ -374,130 +374,147 @@ const (
 )
 
 type RuntimeContext struct {
-	_d1e9       string
-	_96f2 string // GLOBAL_API_KEY from .env — used as token for licensing check
-	_gj   string
-	_oq5       atomic.Bool
-	_z1uh      [32]byte // Derived from activation — required by ValidateContext
+	_4g       string
+	_brf string // GLOBAL_API_KEY from .env — used as token for licensing check
+	_sk   string
+	_72       atomic.Bool
+	_zcn      [32]byte // Derived from activation — required by ValidateContext
 	mu           sync.RWMutex
-	_34r       string // Registration URL shown to users before activation
-	_8344     string // Registration token for polling
-	_i7xh         string
-	_1s8g      string
+	_191       string // Registration URL shown to users before activation
+	_ou     string // Registration token for polling
+	_0jkp         string
+	_r3j      string
 }
 
 func (rc *RuntimeContext) ContextHash() [32]byte {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
-	return rc._z1uh
+	return rc._zcn
 }
 
 func (rc *RuntimeContext) IsActive() bool {
-	return rc._oq5.Load()
+	return rc._72.Load()
 }
 
 func (rc *RuntimeContext) RegistrationURL() string {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
-	return rc._34r
+	return rc._191
 }
 
 func (rc *RuntimeContext) APIKey() string {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
-	return rc._d1e9
+	return rc._4g
 }
 
 func (rc *RuntimeContext) InstanceID() string {
-	return rc._gj
+	return rc._sk
 }
 
-func InitializeRuntime(_i7xh, _1s8g, _96f2 string) *RuntimeContext {
-	if _i7xh == "" {
-		_i7xh = "evolution-go"
+func InitializeRuntime(_0jkp, _r3j, _brf string) *RuntimeContext {
+	if _0jkp == "" {
+		_0jkp = "evolution-go"
 	}
-	if _1s8g == "" {
-		_1s8g = "unknown"
+	if _r3j == "" {
+		_r3j = "unknown"
 	}
 
 	rc := &RuntimeContext{
-		_i7xh:         _i7xh,
-		_1s8g:      _1s8g,
-		_96f2: _96f2,
+		_0jkp:         _0jkp,
+		_r3j:      _r3j,
+		_brf: _brf,
 	}
 
-	id, err := _sj()
+	id, err := _6z()
 	if err != nil {
 		log.Fatalf("[runtime] failed to initialize instance: %v", err)
 	}
-	rc._gj = id
+	rc._sk = id
 
-	rd, err := _rjz7()
+	rd, err := _vl()
 	if err == nil && rd.APIKey != "" {
-		rc._d1e9 = rd.APIKey
+		rc._4g = rd.APIKey
 		fmt.Printf("  ✓ License found: %s...%s\n", rd.APIKey[:8], rd.APIKey[len(rd.APIKey)-4:])
 
-		rc._z1uh = sha256.Sum256([]byte(rc._d1e9 + rc._gj))
-		rc._oq5.Store(true)
+		rc._zcn = sha256.Sum256([]byte(rc._4g + rc._sk))
+		rc._72.Store(true)
 		ActivateIntegrity(rc)
 		fmt.Println("  ✓ License activated successfully")
 
 		go func() {
-			if err := _5tmd(rc, _1s8g); err != nil {
+			if err := _wlr(rc, _r3j); err != nil {
 				fmt.Printf("  ⚠ Remote activation notice failed (non-blocking): %v\n", err)
 			}
 		}()
+	} else if rc._brf != "" {
+		rc._4g = rc._brf
+		if err := _wlr(rc, _r3j); err == nil {
+			_esnc(&RuntimeData{APIKey: rc._brf, Tier: _0jkp})
+			rc._zcn = sha256.Sum256([]byte(rc._4g + rc._sk))
+			rc._72.Store(true)
+			ActivateIntegrity(rc)
+			fmt.Printf("  ✓ GLOBAL_API_KEY accepted — license saved and activated\n")
+		} else {
+			rc._4g = ""
+			_06e()
+			rc._72.Store(false)
+		}
 	} else {
-		fmt.Println()
-		fmt.Println("  ╔══════════════════════════════════════════════════════════╗")
-		fmt.Println("  ║              License Registration Required               ║")
-		fmt.Println("  ╚══════════════════════════════════════════════════════════╝")
-		fmt.Println()
-		fmt.Println("  Server starting without license.")
-		fmt.Println("  API endpoints will return 503 until license is activated.")
-		fmt.Println("  Use GET /license/register to get the registration URL.")
-		fmt.Println()
-		rc._oq5.Store(false)
+		_06e()
+		rc._72.Store(false)
 	}
 
 	return rc
 }
 
-func (rc *RuntimeContext) _2r(authCodeOrKey, _i7xh string, customerID int) error {
-	_d1e9, err := _rbx(authCodeOrKey)
+func _06e() {
+	fmt.Println()
+	fmt.Println("  ╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("  ║              License Registration Required               ║")
+	fmt.Println("  ╚══════════════════════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Println("  Server starting without license.")
+	fmt.Println("  API endpoints will return 503 until license is activated.")
+	fmt.Println("  Use GET /license/register to get the registration URL.")
+	fmt.Println()
+}
+
+func (rc *RuntimeContext) _mz06(authCodeOrKey, _0jkp string, customerID int) error {
+	_4g, err := _u7(authCodeOrKey)
 	if err != nil {
 		return fmt.Errorf("key exchange failed: %w", err)
 	}
 
 	rc.mu.Lock()
-	rc._d1e9 = _d1e9
-	rc._34r = ""
-	rc._8344 = ""
+	rc._4g = _4g
+	rc._191 = ""
+	rc._ou = ""
 	rc.mu.Unlock()
 
-	if err := _pi(&RuntimeData{
-		APIKey:     _d1e9,
-		Tier:       _i7xh,
+	if err := _esnc(&RuntimeData{
+		APIKey:     _4g,
+		Tier:       _0jkp,
 		CustomerID: customerID,
 	}); err != nil {
 		fmt.Printf("  ⚠ Warning: could not save license: %v\n", err)
 	}
 
-	if err := _5tmd(rc, rc._1s8g); err != nil {
+	if err := _wlr(rc, rc._r3j); err != nil {
 		return err
 	}
 
 	rc.mu.Lock()
-	rc._z1uh = sha256.Sum256([]byte(rc._d1e9 + rc._gj))
+	rc._zcn = sha256.Sum256([]byte(rc._4g + rc._sk))
 	rc.mu.Unlock()
-	rc._oq5.Store(true)
+	rc._72.Store(true)
 	ActivateIntegrity(rc)
 
-	fmt.Printf("  ✓ License activated! Key: %s...%s (_i7xh: %s)\n",
-		_d1e9[:8], _d1e9[len(_d1e9)-4:], _i7xh)
+	fmt.Printf("  ✓ License activated! Key: %s...%s (_0jkp: %s)\n",
+		_4g[:8], _4g[len(_4g)-4:], _0jkp)
 
 	go func() {
-		if err := _yry(rc, 0); err != nil {
+		if err := _mbz(rc, 0); err != nil {
 			fmt.Printf("  ⚠ First heartbeat failed: %v\n", err)
 		}
 	}()
@@ -509,10 +526,10 @@ func ValidateContext(rc *RuntimeContext) (bool, string) {
 	if rc == nil {
 		return false, ""
 	}
-	if !rc._oq5.Load() {
+	if !rc._72.Load() {
 		return false, rc.RegistrationURL()
 	}
-	expected := sha256.Sum256([]byte(rc._d1e9 + rc._gj))
+	expected := sha256.Sum256([]byte(rc._4g + rc._sk))
 	actual := rc.ContextHash()
 	if expected != actual {
 		return false, ""
@@ -527,7 +544,11 @@ func GateMiddleware(rc *RuntimeContext) gin.HandlerFunc {
 		if path == "/health" || path == "/server/ok" || path == "/favicon.ico" ||
 			path == "/license/status" || path == "/license/register" || path == "/license/activate" ||
 			strings.HasPrefix(path, "/manager") || strings.HasPrefix(path, "/assets") ||
-			strings.HasPrefix(path, "/swagger") || path == "/ws" {
+			strings.HasPrefix(path, "/swagger") || path == "/ws" ||
+			strings.HasSuffix(path, ".svg") || strings.HasSuffix(path, ".css") ||
+			strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".png") ||
+			strings.HasSuffix(path, ".ico") || strings.HasSuffix(path, ".woff2") ||
+			strings.HasSuffix(path, ".woff") || strings.HasSuffix(path, ".ttf") {
 			c.Next()
 			return
 		}
@@ -560,17 +581,17 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 		lic.GET("/status", func(c *gin.Context) {
 			status := "inactive"
 			if rc.IsActive() {
-				status = "_oq5"
+				status = "active"
 			}
 
 			resp := gin.H{
 				"status":      status,
-				"instance_id": rc._gj,
+				"instance_id": rc._sk,
 			}
 
 			rc.mu.RLock()
-			if rc._d1e9 != "" {
-				resp["api_key"] = rc._d1e9[:8] + "..." + rc._d1e9[len(rc._d1e9)-4:]
+			if rc._4g != "" {
+				resp["api_key"] = rc._4g[:8] + "..." + rc._4g[len(rc._4g)-4:]
 			}
 			rc.mu.RUnlock()
 
@@ -580,14 +601,14 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 		lic.GET("/register", func(c *gin.Context) {
 			if rc.IsActive() {
 				c.JSON(http.StatusOK, gin.H{
-					"status":  "_oq5",
-					"message": "License is already _oq5",
+					"status":  "active",
+					"message": "License is already active",
 				})
 				return
 			}
 
 			rc.mu.RLock()
-			existingURL := rc._34r
+			existingURL := rc._191
 			rc.mu.RUnlock()
 
 			if existingURL != "" {
@@ -599,15 +620,15 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 			}
 
 			payload := map[string]string{
-				"_i7xh":        rc._i7xh,
-				"_1s8g":     rc._1s8g,
-				"instance_id": rc._gj,
+				"tier":        rc._0jkp,
+				"version":     rc._r3j,
+				"instance_id": rc._sk,
 			}
 			if redirectURI := c.Query("redirect_uri"); redirectURI != "" {
 				payload["redirect_uri"] = redirectURI
 			}
 
-			resp, err := _0r("/v1/register/init", payload)
+			resp, err := _j4("/v1/register/init", payload)
 			if err != nil {
 				c.JSON(http.StatusBadGateway, gin.H{
 					"error":   "Failed to contact licensing server",
@@ -618,38 +639,38 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				_f3mf := _36l2(resp)
+				_iweb := _fku(resp)
 				c.JSON(resp.StatusCode, gin.H{
 					"error":   "Licensing server error",
-					"details": _f3mf.Error(),
+					"details": _iweb.Error(),
 				})
 				return
 			}
 
-			var _0rb struct {
+			var _75 struct {
 				RegisterURL string `json:"register_url"`
 				Token       string `json:"token"`
 			}
-			json.NewDecoder(resp.Body).Decode(&_0rb)
+			json.NewDecoder(resp.Body).Decode(&_75)
 
 			rc.mu.Lock()
-			rc._34r = _0rb.RegisterURL
-			rc._8344 = _0rb.Token
+			rc._191 = _75.RegisterURL
+			rc._ou = _75.Token
 			rc.mu.Unlock()
 
-			fmt.Printf("  → Registration URL: %s\n", _0rb.RegisterURL)
+			fmt.Printf("  → Registration URL: %s\n", _75.RegisterURL)
 
 			c.JSON(http.StatusOK, gin.H{
 				"status":       "pending",
-				"register_url": _0rb.RegisterURL,
+				"register_url": _75.RegisterURL,
 			})
 		})
 
 		lic.GET("/activate", func(c *gin.Context) {
 			if rc.IsActive() {
 				c.JSON(http.StatusOK, gin.H{
-					"status":  "_oq5",
-					"message": "License is already _oq5",
+					"status":  "active",
+					"message": "License is already active",
 				})
 				return
 			}
@@ -663,9 +684,9 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 				return
 			}
 
-			exchangeResp, err := _0r("/v1/register/exchange", map[string]string{
+			exchangeResp, err := _j4("/v1/register/exchange", map[string]string{
 				"authorization_code": code,
-				"instance_id":       rc._gj,
+				"instance_id":       rc._sk,
 			})
 			if err != nil {
 				c.JSON(http.StatusBadGateway, gin.H{
@@ -677,22 +698,22 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 			defer exchangeResp.Body.Close()
 
 			if exchangeResp.StatusCode != http.StatusOK {
-				_f3mf := _36l2(exchangeResp)
+				_iweb := _fku(exchangeResp)
 				c.JSON(exchangeResp.StatusCode, gin.H{
 					"error":   "Exchange failed",
-					"details": _f3mf.Error(),
+					"details": _iweb.Error(),
 				})
 				return
 			}
 
-			var _2q struct {
+			var _hf struct {
 				APIKey     string `json:"api_key"`
-				Tier       string `json:"_i7xh"`
+				Tier       string `json:"tier"`
 				CustomerID int    `json:"customer_id"`
 			}
-			json.NewDecoder(exchangeResp.Body).Decode(&_2q)
+			json.NewDecoder(exchangeResp.Body).Decode(&_hf)
 
-			if _2q.APIKey == "" {
+			if _hf.APIKey == "" {
 				c.JSON(http.StatusBadRequest, gin.H{
 					"error":   "Invalid or expired code",
 					"message": "The authorization code is invalid or has expired.",
@@ -700,7 +721,7 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 				return
 			}
 
-			if err := rc._2r(_2q.APIKey, _2q.Tier, _2q.CustomerID); err != nil {
+			if err := rc._mz06(_hf.APIKey, _hf.Tier, _hf.CustomerID); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error":   "Activation failed",
 					"details": err.Error(),
@@ -709,7 +730,7 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 			}
 
 			c.JSON(http.StatusOK, gin.H{
-				"status":  "_oq5",
+				"status":  "active",
 				"message": "License activated successfully!",
 			})
 		})
@@ -730,7 +751,7 @@ func StartHeartbeat(ctx context.Context, rc *RuntimeContext, startTime time.Time
 					continue
 				}
 				uptime := int64(time.Since(startTime).Seconds())
-				if err := _yry(rc, uptime); err != nil {
+				if err := _mbz(rc, uptime); err != nil {
 					fmt.Printf("  ⚠ Heartbeat failed (non-blocking): %v\n", err)
 				}
 			}
@@ -739,14 +760,14 @@ func StartHeartbeat(ctx context.Context, rc *RuntimeContext, startTime time.Time
 }
 
 func Shutdown(rc *RuntimeContext) {
-	if rc == nil || rc._d1e9 == "" {
+	if rc == nil || rc._4g == "" {
 		return
 	}
-	_5b3y(rc)
+	_fa(rc)
 }
 
-func _8g(code string) (_d1e9 string, err error) {
-	resp, err := _0r("/v1/register/exchange", map[string]string{
+func _x1(code string) (_4g string, err error) {
+	resp, err := _j4("/v1/register/exchange", map[string]string{
 		"authorization_code": code,
 	})
 	if err != nil {
@@ -755,84 +776,84 @@ func _8g(code string) (_d1e9 string, err error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", _36l2(resp)
+		return "", _fku(resp)
 	}
 
-	var _2q struct {
+	var _hf struct {
 		APIKey string `json:"api_key"`
 	}
-	json.NewDecoder(resp.Body).Decode(&_2q)
-	if _2q.APIKey == "" {
+	json.NewDecoder(resp.Body).Decode(&_hf)
+	if _hf.APIKey == "" {
 		return "", fmt.Errorf("exchange returned empty api_key")
 	}
-	return _2q.APIKey, nil
+	return _hf.APIKey, nil
 }
 
-func _rbx(authCodeOrKey string) (string, error) {
-	_d1e9, err := _8g(authCodeOrKey)
-	if err == nil && _d1e9 != "" {
-		return _d1e9, nil
+func _u7(authCodeOrKey string) (string, error) {
+	_4g, err := _x1(authCodeOrKey)
+	if err == nil && _4g != "" {
+		return _4g, nil
 	}
 	return authCodeOrKey, nil
 }
 
-func _5tmd(rc *RuntimeContext, _1s8g string) error {
-	resp, err := _c14s("/v1/activate", map[string]string{
-		"instance_id": rc._gj,
-		"_1s8g":     _1s8g,
-	}, rc._d1e9)
+func _wlr(rc *RuntimeContext, _r3j string) error {
+	resp, err := _ys("/v1/activate", map[string]string{
+		"instance_id": rc._sk,
+		"version":     _r3j,
+	}, rc._4g)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return _36l2(resp)
+		return _fku(resp)
 	}
 
-	var _2q struct {
+	var _hf struct {
 		Status string `json:"status"`
 	}
-	json.NewDecoder(resp.Body).Decode(&_2q)
+	json.NewDecoder(resp.Body).Decode(&_hf)
 
-	if _2q.Status != "_oq5" {
-		return fmt.Errorf("activation returned status: %s", _2q.Status)
+	if _hf.Status != "active" {
+		return fmt.Errorf("activation returned status: %s", _hf.Status)
 	}
 	return nil
 }
 
-func _yry(rc *RuntimeContext, uptimeSeconds int64) error {
-	resp, err := _c14s("/v1/heartbeat", map[string]any{
-		"instance_id":    rc._gj,
+func _mbz(rc *RuntimeContext, uptimeSeconds int64) error {
+	resp, err := _ys("/v1/heartbeat", map[string]any{
+		"instance_id":    rc._sk,
 		"uptime_seconds": uptimeSeconds,
-		"_1s8g":        rc._1s8g,
-	}, rc._d1e9)
+		"version":        rc._r3j,
+	}, rc._4g)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return _36l2(resp)
+		return _fku(resp)
 	}
 	return nil
 }
 
-func _5b3y(rc *RuntimeContext) {
+func _fa(rc *RuntimeContext) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	body, _ := json.Marshal(map[string]string{
-		"instance_id": rc._gj,
+		"instance_id": rc._sk,
 	})
 
-	url := _40hs() + "/v1/deactivate"
+	url := _k5qk() + "/v1/deactivate"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", rc._d1e9)
-	req.Header.Set("X-Signature", _pq(body, rc._d1e9))
-	_ml9.Do(req)
+	req.Header.Set("X-Api-Key", rc._4g)
+	req.Header.Set("X-Signature", _hw1c(body, rc._4g))
+	_dw.Do(req)
 }
