@@ -20,14 +20,18 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION 2>/dev/null || echo '0.0.0')" >> $GITHUB_OUTPUT
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: evoapicloud/evolution-go
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Set up QEMU
@@ -46,12 +50,15 @@ jobs:
         id: docker_build
         uses: docker/build-push-action@v5
         with:
+          context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
 
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}
