@@ -1,5 +1,20 @@
 # Evolution GO - Changelog
 
+## v0.7.1
+
+**Docker:** `evoapicloud/evolution-go:0.7.1`
+
+### 🆕 New Features
+- **Test-send modal in Manager** — new modal in the embedded manager UI to test message sending directly from the panel, covering text, media and interactive message types. Useful for validating an instance right after pairing without leaving the manager.
+
+### 🔧 Improvements / CI
+- **whatsmeow-lib SHA now pinned in the public sync** — the `sync-releases` workflow previously re-cloned whatsmeow `main` on every run, so the SHA listed in the CHANGELOG could drift from what the public repos actually built against. The workflow now captures the SHA from the dev submodule and checks out that exact commit in the target, restoring release reproducibility.
+- **Repository cleanup** — dropped tracked binaries (`evolution-go`, `build/server`), IDE config (`.idea/`) and scratch files (`DIFF-COMPLETO.txt`, `API-INTERACTIVE-DOCS.txt`, `carousel-sender.html`). Expanded `.gitignore` to prevent reincidence.
+
+### 📝 Docs
+- **Postman collection** — added `Set Proxy` request and multipart hints on `/send/media`; collection file renamed from `Evolution GO.postman_collection (2).json` to `Evolution GO.postman_collection.json`.
+- **Interactive messages docs** — additional examples and corrections.
+
 ## v0.7.0
 
 **Docker:** `evoapicloud/evolution-go:0.7.0`
