@@ -213,12 +213,9 @@ evolution-go/
 
 ## Hosting
 
-Deploy Evolution Go with optimized infrastructure:
+Deploy Evolution Go with optimized infrastructure through our HostGator partnership:
 
-| Product | Link |
-|---|---|
-| Evolution Go VPS | [HostGator — Evo Go](https://www.hostgator.com.br/52579-144-3-55.html) |
-| Evolution API VPS | [HostGator — Evo API](https://www.hostgator.com.br/servidor-vps/hospedagem-evo-api/lp-afiliado) |
+[**Evolution Go VPS — HostGator**](https://evolution-api.com/vps-evolution-go)
 
 ---
 
