@@ -25,7 +25,6 @@
   <a href="mailto:suporte@evofoundation.com.br">Support</a>
 </p>
 
-<div align="center"><img src="./public/images/cover.png" alt="Evolution Go" width="400" /></div>
 
 ---
 
