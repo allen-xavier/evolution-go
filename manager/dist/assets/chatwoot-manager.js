@@ -4,6 +4,7 @@
   var ACTION_ICON_ATTR = "data-cw-chatwoot-icon";
   var ACTION_DIVIDER_ATTR = "data-cw-chatwoot-divider";
   var PANEL_ID = "cw-instance-chatwoot-panel";
+  var PANEL_FALLBACK_ID = "cw-instance-chatwoot-panel-fallback";
   var PANEL_MARKER_ATTR = "data-cw-chatwoot-root";
   var SETTINGS_QUERY_KEY = "chatwoot";
   var ACTIVE_INSTANCE_ID = "";
@@ -497,15 +498,39 @@
     return (
       document.querySelector("div.max-w-4xl.mx-auto.space-y-6") ||
       document.querySelector('div[class*="max-w-4xl"][class*="mx-auto"]') ||
+      document.querySelector('div[class*="max-w-4xl"]') ||
       document.querySelector(".flex-1.overflow-y-auto.p-6 .max-w-4xl") ||
       document.querySelector(".flex-1.overflow-y-auto.p-6") ||
       document.querySelector("main")
     );
   }
 
+  function ensureFallbackContainer() {
+    var root = document.getElementById(PANEL_FALLBACK_ID);
+    if (root) return root;
+
+    root = document.createElement("div");
+    root.id = PANEL_FALLBACK_ID;
+    root.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "z-index:999998",
+      "overflow:auto",
+      "padding:16px",
+      "background:rgba(2,6,23,.88)",
+    ].join(";");
+
+    var body = document.body || document.documentElement;
+    body.appendChild(root);
+    return root;
+  }
+
   function removePanelIfExists() {
     var panel = document.getElementById(PANEL_ID);
     if (panel) panel.remove();
+
+    var fallback = document.getElementById(PANEL_FALLBACK_ID);
+    if (fallback) fallback.remove();
   }
 
   async function ensureSettingsPanel() {
@@ -515,11 +540,16 @@
     }
 
     var container = findSettingsContentContainer();
-    if (!container) return;
+    var useFallback = !container;
+    if (!container) container = ensureFallbackContainer();
 
     var panel = document.getElementById(PANEL_ID);
     if (!panel) {
       panel = createPanel();
+      if (useFallback) {
+        panel.style.maxWidth = "1200px";
+        panel.style.margin = "0 auto";
+      }
       if (container.firstChild) {
         container.insertBefore(panel, container.firstChild);
       } else {
@@ -586,6 +616,7 @@
       ev.stopPropagation();
 
       var dynamicCandidate =
+        btn.getAttribute("data-cw-instance-id") ||
         instanceCandidate ||
         resolveInstanceIdFromElement(btn) ||
         readInstanceNameFromCard(findInstanceCard(btn)) ||
@@ -594,7 +625,7 @@
       if (!dynamicCandidate) return;
 
       var resolved = await resolveInstanceIdSmart(dynamicCandidate);
-      if (!resolved) return;
+      if (!resolved || !isUUID(resolved)) return;
 
       btn.setAttribute("data-cw-instance-id", resolved);
       goToInstanceChatwootSettings(resolved);
@@ -646,6 +677,15 @@
       var existingDivider = parent.querySelector("[" + ACTION_DIVIDER_ATTR + "]");
 
       if (existing) {
+        var existingId = existing.getAttribute("data-cw-instance-id") || "";
+        if (!isUUID(existingId) && instanceCandidate) {
+          resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
+            if (resolved && isUUID(resolved)) {
+              existing.setAttribute("data-cw-instance-id", resolved);
+            }
+          });
+        }
+
         if (!existingDivider) {
           existingDivider = createActionDivider(bubbleButton);
         }
@@ -656,6 +696,13 @@
         }
       } else {
         var icon = createIconButton(instanceCandidate, bubbleButton);
+        if (instanceCandidate && !isUUID(instanceCandidate)) {
+          resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
+            if (resolved && isUUID(resolved) && icon && icon.setAttribute) {
+              icon.setAttribute("data-cw-instance-id", resolved);
+            }
+          });
+        }
         var divider = existingDivider || createActionDivider(bubbleButton);
         parent.insertBefore(icon, bubbleButton);
         parent.insertBefore(divider, bubbleButton);
