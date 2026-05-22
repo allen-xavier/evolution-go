@@ -3,12 +3,10 @@
 
   var ACTION_ICON_ATTR = "data-cw-chatwoot-icon";
   var ACTION_DIVIDER_ATTR = "data-cw-chatwoot-divider";
-  var PANEL_ID = "cw-instance-chatwoot-panel";
-  var PANEL_FALLBACK_ID = "cw-instance-chatwoot-panel-fallback";
-  var PANEL_MARKER_ATTR = "data-cw-chatwoot-root";
-  var SETTINGS_QUERY_KEY = "chatwoot";
-  var ACTIVE_INSTANCE_ID = "";
+  var MODAL_ID = "cw-instance-chatwoot-modal";
+  var CACHE_TTL_MS = 15000;
 
+  var ACTIVE_INSTANCE_ID = "";
   var instancesCache = {
     at: 0,
     rows: [],
@@ -19,33 +17,11 @@
     return root.querySelector(selector);
   }
 
-  function qsa(root, selector) {
-    return root.querySelectorAll(selector);
-  }
-
-  function parseInstanceIdFromPath(pathname) {
-    var m = (pathname || "").match(/\/instances\/([^\/?#]+)\/settings(?:\/|$)/i);
-    if (m) return decodeURIComponent(m[1]);
-
-    var fallback = (pathname || "").match(/\/instances\/([^\/?#]+)(?:\/|$)/i);
-    return fallback ? decodeURIComponent(fallback[1]) : "";
-  }
-
-  function parseInstanceIdFromHref(href) {
-    if (!href) return "";
-    try {
-      var url = new URL(href, window.location.origin);
-      return parseInstanceIdFromPath(url.pathname || "");
-    } catch (_e) {
-      return parseInstanceIdFromPath(String(href));
-    }
-  }
-
   function isUUID(value) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
   }
 
-  function normalizeStr(value) {
+  function norm(value) {
     return String(value || "").trim().toLowerCase();
   }
 
@@ -101,6 +77,21 @@
     return window.location.origin.replace(/\/$/, "");
   }
 
+  function parseInstanceIdFromPath(pathname) {
+    var m = (pathname || "").match(/\/instances\/([^\/?#]+)(?:\/settings)?(?:\/|$)/i);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+
+  function parseInstanceIdFromHref(href) {
+    if (!href) return "";
+    try {
+      var url = new URL(href, window.location.origin);
+      return parseInstanceIdFromPath(url.pathname || "");
+    } catch (_e) {
+      return parseInstanceIdFromPath(String(href));
+    }
+  }
+
   function normalizeInstanceRow(raw) {
     if (!raw || typeof raw !== "object") return null;
 
@@ -115,7 +106,7 @@
     };
   }
 
-  function indexInstanceRows(rows) {
+  function indexRows(rows) {
     var index = {};
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
@@ -123,16 +114,16 @@
 
       var keys = [row.id, row.instanceName, row.profileName];
       for (var k = 0; k < keys.length; k++) {
-        var key = normalizeStr(keys[k]);
+        var key = norm(keys[k]);
         if (key) index[key] = row;
       }
     }
     return index;
   }
 
-  async function fetchInstances() {
+  async function fetchInstances(force) {
     var now = Date.now();
-    if (instancesCache.rows.length && now - instancesCache.at < 15000) {
+    if (!force && instancesCache.rows.length && now - instancesCache.at < CACHE_TTL_MS) {
       return instancesCache.rows;
     }
 
@@ -155,14 +146,14 @@
       var data = Array.isArray(body) ? body : Array.isArray(body.data) ? body.data : [];
       var rows = [];
       for (var i = 0; i < data.length; i++) {
-        var normalized = normalizeInstanceRow(data[i]);
-        if (normalized) rows.push(normalized);
+        var item = normalizeInstanceRow(data[i]);
+        if (item) rows.push(item);
       }
 
       instancesCache = {
         at: now,
         rows: rows,
-        byKey: indexInstanceRows(rows),
+        byKey: indexRows(rows),
       };
 
       return rows;
@@ -176,11 +167,15 @@
     if (!raw) return "";
     if (isUUID(raw)) return raw;
 
-    await fetchInstances();
-    var hit = instancesCache.byKey[normalizeStr(raw)];
+    await fetchInstances(false);
+    var hit = instancesCache.byKey[norm(raw)];
     if (hit && hit.id) return hit.id;
 
-    return raw;
+    await fetchInstances(true);
+    hit = instancesCache.byKey[norm(raw)];
+    if (hit && hit.id) return hit.id;
+
+    return "";
   }
 
   function findInstanceCard(el) {
@@ -210,11 +205,14 @@
     return "";
   }
 
-  function resolveInstanceIdFromElement(el) {
+  function resolveCandidateFromElement(el) {
     var node = el;
     for (var i = 0; i < 8 && node; i++) {
       if (node.getAttribute) {
-        var explicit = node.getAttribute("data-cw-instance-id") || node.getAttribute("data-instance-id");
+        var explicit =
+          node.getAttribute("data-cw-instance-id") ||
+          node.getAttribute("data-cw-instance-candidate") ||
+          node.getAttribute("data-instance-id");
         if (explicit) return explicit;
       }
 
@@ -233,150 +231,15 @@
     var fromCard = readInstanceNameFromCard(card);
     if (fromCard) return fromCard;
 
-    var current = parseInstanceIdFromPath(window.location.pathname || "");
-    return current || "";
-  }
-
-  function isOnInstanceSettingsPage() {
-    return /\/manager\/instances\/[^\/?#]+\/settings(?:\/|$)/i.test(window.location.pathname || "");
-  }
-
-  function shouldShowChatwootPanel() {
-    if (!isOnInstanceSettingsPage()) return false;
-
-    var params = new URLSearchParams(window.location.search || "");
-    if (!params.has(SETTINGS_QUERY_KEY)) return false;
-
-    var value = (params.get(SETTINGS_QUERY_KEY) || "").trim().toLowerCase();
-    return value === "" || value === "1" || value === "true" || value === "yes";
-  }
-
-  function goToInstanceChatwootSettings(instanceId) {
-    if (!instanceId) return;
-
-    var params = new URLSearchParams(window.location.search || "");
-    params.set(SETTINGS_QUERY_KEY, "1");
-
-    var target =
-      "/manager/instances/" +
-      encodeURIComponent(instanceId) +
-      "/settings" +
-      (params.toString() ? "?" + params.toString() : "");
-
-    if (window.location.pathname + window.location.search === target) {
-      window.dispatchEvent(new Event("locationchange"));
-      return;
-    }
-
-    // Force full navigation so the settings page always renders.
-    window.location.assign(target);
-  }
-
-  function closeChatwootPanelQuery() {
-    if (!isOnInstanceSettingsPage()) return;
-
-    var params = new URLSearchParams(window.location.search || "");
-    if (!params.has(SETTINGS_QUERY_KEY)) return;
-
-    params.delete(SETTINGS_QUERY_KEY);
-
-    var target = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
-    history.pushState({}, "", target);
-    window.dispatchEvent(new Event("locationchange"));
-  }
-
-  function panelHTML() {
-    return (
-      '<div class="flex items-center justify-between gap-3 mb-4">' +
-      '<div class="flex items-center gap-2">' +
-      '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="color:#1f93ff;">' +
-      '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
-      '</svg>' +
-      '<h2 class="text-lg font-semibold text-foreground">Integração Chatwoot</h2>' +
-      '</div>' +
-      '<button id="cw-close-page" type="button" class="inline-flex items-center rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent">Fechar</button>' +
-      '</div>' +
-      '<p class="text-sm text-muted-foreground mb-4">Configuração por instância com sincronização bidirecional de mensagens e mídia.</p>' +
-      '<div class="mb-4 rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground">' +
-      '<strong class="text-foreground">Instância ID:</strong> <span id="cw-instance-id-label">-</span>' +
-      '</div>' +
-      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-enabled" type="checkbox" class="rounded border-input w-4 h-4"/> Habilitado</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-signMsg" type="checkbox" class="rounded border-input w-4 h-4"/> Assinar mensagem</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-reopenConversation" type="checkbox" class="rounded border-input w-4 h-4"/> Reabrir conversa</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-conversationPending" type="checkbox" class="rounded border-input w-4 h-4"/> Conversa pendente</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-mergeBrazilContacts" type="checkbox" class="rounded border-input w-4 h-4"/> Mesclar contatos BR</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-importContacts" type="checkbox" class="rounded border-input w-4 h-4"/> Importar contatos</label>' +
-      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-importMessages" type="checkbox" class="rounded border-input w-4 h-4"/> Importar mensagens</label>' +
-      '</div>' +
-      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">URL Chatwoot</label><input id="cw-url" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="https://chatwoot.seudominio.com"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Account ID</label><input id="cw-accountId" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="1"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Token API</label><input id="cw-token" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="api_access_token"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox ID (Caixa)</label><input id="cw-inboxId" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="10"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox Identifier (opcional)</label><input id="cw-inboxIdentifier" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="opcional"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Nome Inbox</label><input id="cw-nameInbox" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Suporte WhatsApp"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Organização</label><input id="cw-organization" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Minha Empresa"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Logo (URL)</label><input id="cw-logo" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="https://..."/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Dias limite importação</label><input id="cw-daysLimitImportMessages" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="3"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Delimitador assinatura</label><input id="cw-signDelimiter" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="\\n"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Webhook Secret (opcional)</label><input id="cw-webhookSecret" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground"/></div>' +
-      '</div>' +
-      '<div class="mt-4">' +
-      '<label class="block text-sm font-medium text-foreground mb-1">Ignore JIDs (um por linha)</label>' +
-      '<textarea id="cw-ignoreJids" rows="4" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="5511999998888@s.whatsapp.net"></textarea>' +
-      '</div>' +
-      '<div class="mt-4 rounded-md border border-input bg-background px-3 py-2">' +
-      '<div class="text-sm font-medium text-foreground mb-1">Webhook URL para configurar no Chatwoot</div>' +
-      '<code id="cw-webhookUrl" class="block break-all text-xs text-muted-foreground"></code>' +
-      '</div>' +
-      '<div class="mt-4 flex items-center justify-end gap-2">' +
-      '<span id="cw-status" class="text-xs text-muted-foreground mr-auto"></span>' +
-      '<button id="cw-load" type="button" class="inline-flex items-center rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent">Recarregar</button>' +
-      '<button id="cw-save" type="button" class="inline-flex items-center rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90">Salvar</button>' +
-      '</div>'
-    );
-  }
-
-  function createPanel() {
-    var panel = document.createElement("div");
-    panel.id = PANEL_ID;
-    panel.setAttribute(PANEL_MARKER_ATTR, "1");
-    panel.className = "rounded-lg border border-sidebar-border bg-card p-6";
-    panel.innerHTML = panelHTML();
-    return panel;
-  }
-
-  function bindPanel(panel) {
-    var closeBtn = qs(panel, "#cw-close-page");
-    if (closeBtn) {
-      closeBtn.addEventListener("click", function () {
-        closeChatwootPanelQuery();
-      });
-    }
-
-    var loadBtn = qs(panel, "#cw-load");
-    if (loadBtn) {
-      loadBtn.onclick = function () {
-        if (!ACTIVE_INSTANCE_ID) return;
-        loadConfig(panel, ACTIVE_INSTANCE_ID);
-      };
-    }
-
-    var saveBtn = qs(panel, "#cw-save");
-    if (saveBtn) {
-      saveBtn.onclick = function () {
-        if (!ACTIVE_INSTANCE_ID) return;
-        saveConfig(panel, ACTIVE_INSTANCE_ID);
-      };
-    }
+    var fromPath = parseInstanceIdFromPath(window.location.pathname || "");
+    return fromPath || "";
   }
 
   function setStatus(root, text, isError) {
     var node = qs(root, "#cw-status");
     if (!node) return;
     node.textContent = text || "";
-    node.style.color = isError ? "#ef4444" : "";
+    node.style.color = isError ? "#ef4444" : "#94a3b8";
   }
 
   function fillForm(root, data) {
@@ -435,11 +298,11 @@
   async function loadConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(root, "API key não encontrada no manager.", true);
+      setStatus(root, "API key nao encontrada no manager.", true);
       return;
     }
 
-    setStatus(root, "Carregando configuração...", false);
+    setStatus(root, "Carregando configuracao...", false);
     var resp = await fetch("/chatwoot/find/" + encodeURIComponent(instanceId), {
       method: "GET",
       headers: { apikey: apiKey },
@@ -451,19 +314,19 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao carregar configuração";
+      var msg = (data && data.error) || "Falha ao carregar configuracao";
       setStatus(root, msg, true);
       return;
     }
 
     fillForm(root, data.data || {});
-    setStatus(root, "Configuração carregada.", false);
+    setStatus(root, "Configuracao carregada.", false);
   }
 
   async function saveConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(root, "API key não encontrada no manager.", true);
+      setStatus(root, "API key nao encontrada no manager.", true);
       return;
     }
 
@@ -485,106 +348,136 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao salvar configuração";
+      var msg = (data && data.error) || "Falha ao salvar configuracao";
       setStatus(root, msg, true);
       return;
     }
 
     fillForm(root, (data && data.data) || payload);
-    setStatus(root, "Configuração salva com sucesso.", false);
+    setStatus(root, "Configuracao salva com sucesso.", false);
   }
 
-  function findSettingsContentContainer() {
-    return (
-      document.querySelector("div.max-w-4xl.mx-auto.space-y-6") ||
-      document.querySelector('div[class*="max-w-4xl"][class*="mx-auto"]') ||
-      document.querySelector('div[class*="max-w-4xl"]') ||
-      document.querySelector(".flex-1.overflow-y-auto.p-6 .max-w-4xl") ||
-      document.querySelector(".flex-1.overflow-y-auto.p-6") ||
-      document.querySelector("main")
-    );
-  }
+  function ensureModal() {
+    var modal = document.getElementById(MODAL_ID);
+    if (modal) return modal;
 
-  function ensureFallbackContainer() {
-    var root = document.getElementById(PANEL_FALLBACK_ID);
-    if (root) return root;
-
-    root = document.createElement("div");
-    root.id = PANEL_FALLBACK_ID;
-    root.style.cssText = [
+    modal = document.createElement("div");
+    modal.id = MODAL_ID;
+    modal.style.cssText = [
       "position:fixed",
       "inset:0",
-      "z-index:999998",
-      "overflow:auto",
+      "display:none",
+      "align-items:center",
+      "justify-content:center",
       "padding:16px",
-      "background:rgba(2,6,23,.88)",
+      "background:rgba(2,6,23,.85)",
+      "z-index:999999",
+      "overflow:auto",
+      "font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
     ].join(";");
 
-    var body = document.body || document.documentElement;
-    body.appendChild(root);
-    return root;
+    modal.innerHTML =
+      '<div style="width:min(980px,96vw);max-height:94vh;overflow:auto;background:#0b1220;border:1px solid rgba(148,163,184,.22);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.5);padding:16px;">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">' +
+      '<div style="display:flex;align-items:center;gap:8px;">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="color:#1f93ff;">' +
+      '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
+      '</svg>' +
+      '<h3 style="margin:0;font-size:18px;color:#e2e8f0;">Chatwoot da Instancia</h3>' +
+      '</div>' +
+      '<button id="cw-close" type="button" style="border:1px solid rgba(148,163,184,.3);background:#111827;color:#e2e8f0;border-radius:8px;padding:6px 10px;cursor:pointer;">Fechar</button>' +
+      '</div>' +
+      '<p style="margin:0 0 10px;color:#94a3b8;font-size:13px;">Configuracao por instancia com sincronizacao bidirecional de mensagens e midia.</p>' +
+      '<div style="margin:0 0 10px;padding:8px;border:1px solid rgba(148,163,184,.25);border-radius:8px;background:#0f172a;color:#94a3b8;font-size:12px;">Instancia ID: <strong id="cw-instance-id" style="color:#e2e8f0;"></strong></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:10px;">' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-enabled" type="checkbox"/> Habilitado</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-signMsg" type="checkbox"/> Assinar mensagem</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-reopenConversation" type="checkbox"/> Reabrir conversa</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-conversationPending" type="checkbox"/> Conversa pendente</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-mergeBrazilContacts" type="checkbox"/> Mesclar contatos BR</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-importContacts" type="checkbox"/> Importar contatos</label>' +
+      '<label style="display:flex;gap:8px;align-items:center;color:#e2e8f0;font-size:14px;"><input id="cw-importMessages" type="checkbox"/> Importar mensagens</label>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">URL Chatwoot</div><input id="cw-url" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" placeholder="https://chatwoot.seudominio.com"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Account ID</div><input id="cw-accountId" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" placeholder="1"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Token API</div><input id="cw-token" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" placeholder="api_access_token"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Inbox ID (Caixa)</div><input id="cw-inboxId" type="number" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" placeholder="10"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Inbox Identifier (opcional)</div><input id="cw-inboxIdentifier" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Nome Inbox</div><input id="cw-nameInbox" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Organizacao</div><input id="cw-organization" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Logo (URL)</div><input id="cw-logo" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Dias limite importacao</div><input id="cw-daysLimitImportMessages" type="number" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" value="3"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Delimitador assinatura</div><input id="cw-signDelimiter" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;" value="\\n"/></div>' +
+      '<div><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Webhook Secret (opcional)</div><input id="cw-webhookSecret" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"/></div>' +
+      '</div>' +
+      '<div style="margin-top:10px;">' +
+      '<div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Ignore JIDs (um por linha)</div>' +
+      '<textarea id="cw-ignoreJids" rows="4" style="width:100%;padding:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;border-radius:8px;"></textarea>' +
+      '</div>' +
+      '<div style="margin-top:10px;padding:8px;border:1px solid rgba(148,163,184,.25);border-radius:8px;background:#0f172a;">' +
+      '<div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">Webhook URL para configurar no Chatwoot</div>' +
+      '<code id="cw-webhookUrl" style="display:block;word-break:break-all;color:#e2e8f0;font-size:12px;"></code>' +
+      '</div>' +
+      '<div style="margin-top:12px;display:flex;gap:8px;align-items:center;justify-content:flex-end;">' +
+      '<span id="cw-status" style="font-size:12px;color:#94a3b8;flex:1 1 auto;"></span>' +
+      '<button id="cw-load" type="button" style="border:1px solid rgba(148,163,184,.35);background:#111827;color:#e2e8f0;border-radius:8px;padding:8px 10px;cursor:pointer;">Recarregar</button>' +
+      '<button id="cw-save" type="button" style="border:none;background:#0284c7;color:#fff;border-radius:8px;padding:8px 12px;cursor:pointer;">Salvar</button>' +
+      '</div>' +
+      '</div>';
+
+    document.body.appendChild(modal);
+
+    qs(modal, "#cw-close").onclick = function () {
+      modal.style.display = "none";
+    };
+
+    modal.addEventListener("click", function (ev) {
+      if (ev.target === modal) modal.style.display = "none";
+    });
+
+    qs(modal, "#cw-load").onclick = function () {
+      if (!ACTIVE_INSTANCE_ID) return;
+      loadConfig(modal, ACTIVE_INSTANCE_ID);
+    };
+
+    qs(modal, "#cw-save").onclick = function () {
+      if (!ACTIVE_INSTANCE_ID) return;
+      saveConfig(modal, ACTIVE_INSTANCE_ID);
+    };
+
+    return modal;
   }
 
-  function removePanelIfExists() {
-    var panel = document.getElementById(PANEL_ID);
-    if (panel) panel.remove();
+  function openModalForInstance(instanceId) {
+    if (!instanceId || !isUUID(instanceId)) return;
 
-    var fallback = document.getElementById(PANEL_FALLBACK_ID);
-    if (fallback) fallback.remove();
-  }
+    var modal = ensureModal();
+    ACTIVE_INSTANCE_ID = instanceId;
 
-  async function ensureSettingsPanel() {
-    if (!shouldShowChatwootPanel()) {
-      removePanelIfExists();
-      return;
-    }
+    var idNode = qs(modal, "#cw-instance-id");
+    if (idNode) idNode.textContent = instanceId;
 
-    var container = findSettingsContentContainer();
-    var useFallback = !container;
-    if (!container) container = ensureFallbackContainer();
-
-    var panel = document.getElementById(PANEL_ID);
-    if (!panel) {
-      panel = createPanel();
-      if (useFallback) {
-        panel.style.maxWidth = "1200px";
-        panel.style.margin = "0 auto";
-      }
-      if (container.firstChild) {
-        container.insertBefore(panel, container.firstChild);
-      } else {
-        container.appendChild(panel);
-      }
-      bindPanel(panel);
-    }
-
-    var currentPathInstance = parseInstanceIdFromPath(window.location.pathname || "");
-    var resolvedInstance = await resolveInstanceIdSmart(currentPathInstance);
-    var finalInstance = resolvedInstance || currentPathInstance;
-    if (!finalInstance) return;
-
-    var label = qs(panel, "#cw-instance-id-label");
-    if (label) label.textContent = finalInstance;
-
-    var current = panel.getAttribute("data-cw-instance-id") || "";
-    if (current === finalInstance) return;
-
-    panel.setAttribute("data-cw-instance-id", finalInstance);
-    ACTIVE_INSTANCE_ID = finalInstance;
-
-    var webhookNode = qs(panel, "#cw-webhookUrl");
+    var webhookNode = qs(modal, "#cw-webhookUrl");
     if (webhookNode) {
-      webhookNode.textContent = detectApiBaseURL() + "/chatwoot/webhook/" + encodeURIComponent(finalInstance);
+      webhookNode.textContent = detectApiBaseURL() + "/chatwoot/webhook/" + encodeURIComponent(instanceId);
     }
 
-    loadConfig(panel, finalInstance);
+    modal.style.display = "flex";
+    loadConfig(modal, instanceId);
+  }
+
+  async function openModalFromCandidate(candidate) {
+    var resolved = await resolveInstanceIdSmart(candidate);
+    if (!resolved || !isUUID(resolved)) return;
+    openModalForInstance(resolved);
   }
 
   function createIconButton(instanceCandidate, referenceEl) {
     var btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute(ACTION_ICON_ATTR, "1");
-    if (instanceCandidate) btn.setAttribute("data-cw-instance-id", instanceCandidate);
+    if (instanceCandidate) btn.setAttribute("data-cw-instance-candidate", instanceCandidate);
     btn.setAttribute("title", "Chatwoot");
     btn.setAttribute("aria-label", "Chatwoot");
 
@@ -611,24 +504,18 @@
       '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
       '</svg>';
 
-    btn.onclick = async function (ev) {
+    btn.onclick = function (ev) {
       ev.preventDefault();
       ev.stopPropagation();
 
-      var dynamicCandidate =
+      var candidate =
         btn.getAttribute("data-cw-instance-id") ||
-        instanceCandidate ||
-        resolveInstanceIdFromElement(btn) ||
-        readInstanceNameFromCard(findInstanceCard(btn)) ||
+        btn.getAttribute("data-cw-instance-candidate") ||
+        resolveCandidateFromElement(btn) ||
         "";
 
-      if (!dynamicCandidate) return;
-
-      var resolved = await resolveInstanceIdSmart(dynamicCandidate);
-      if (!resolved || !isUUID(resolved)) return;
-
-      btn.setAttribute("data-cw-instance-id", resolved);
-      goToInstanceChatwootSettings(resolved);
+      if (!candidate) return;
+      openModalFromCandidate(candidate);
     };
 
     return btn;
@@ -659,9 +546,9 @@
     if (!bubbleButtons.length) {
       var bubblePaths = document.querySelectorAll('svg path[d*="H7l-4 4V5a2 2"]');
       bubbleButtons = [];
-      for (var p = 0; p < bubblePaths.length; p++) {
-        var iconButton = bubblePaths[p].closest("button, a");
-        if (iconButton) bubbleButtons.push(iconButton);
+      for (var bp = 0; bp < bubblePaths.length; bp++) {
+        var fromPath = bubblePaths[bp].closest("button, a");
+        if (fromPath) bubbleButtons.push(fromPath);
       }
     }
 
@@ -672,15 +559,18 @@
       var parent = bubbleButton.parentElement;
       if (!parent) continue;
 
-      var instanceCandidate = resolveInstanceIdFromElement(parent);
+      var instanceCandidate = resolveCandidateFromElement(parent);
       var existing = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
       var existingDivider = parent.querySelector("[" + ACTION_DIVIDER_ATTR + "]");
 
       if (existing) {
-        var existingId = existing.getAttribute("data-cw-instance-id") || "";
-        if (!isUUID(existingId) && instanceCandidate) {
+        if (instanceCandidate && !existing.getAttribute("data-cw-instance-candidate")) {
+          existing.setAttribute("data-cw-instance-candidate", instanceCandidate);
+        }
+
+        if (instanceCandidate && !existing.getAttribute("data-cw-instance-id")) {
           resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
-            if (resolved && isUUID(resolved)) {
+            if (resolved && isUUID(resolved) && existing && existing.setAttribute) {
               existing.setAttribute("data-cw-instance-id", resolved);
             }
           });
@@ -690,23 +580,31 @@
           existingDivider = createActionDivider(bubbleButton);
         }
 
-        if (existing.nextSibling !== existingDivider || existingDivider.nextSibling !== bubbleButton) {
+        if (
+          existing.parentElement !== parent ||
+          existing.nextElementSibling !== existingDivider ||
+          existingDivider.nextElementSibling !== bubbleButton
+        ) {
           parent.insertBefore(existing, bubbleButton);
           parent.insertBefore(existingDivider, bubbleButton);
         }
-      } else {
-        var icon = createIconButton(instanceCandidate, bubbleButton);
-        if (instanceCandidate && !isUUID(instanceCandidate)) {
-          resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
-            if (resolved && isUUID(resolved) && icon && icon.setAttribute) {
-              icon.setAttribute("data-cw-instance-id", resolved);
-            }
-          });
-        }
-        var divider = existingDivider || createActionDivider(bubbleButton);
-        parent.insertBefore(icon, bubbleButton);
-        parent.insertBefore(divider, bubbleButton);
+        continue;
       }
+
+      var icon = createIconButton(instanceCandidate, bubbleButton);
+      if (instanceCandidate && isUUID(instanceCandidate)) {
+        icon.setAttribute("data-cw-instance-id", instanceCandidate);
+      } else if (instanceCandidate) {
+        resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
+          if (resolved && isUUID(resolved) && icon && icon.setAttribute) {
+            icon.setAttribute("data-cw-instance-id", resolved);
+          }
+        });
+      }
+
+      var divider = existingDivider || createActionDivider(bubbleButton);
+      parent.insertBefore(icon, bubbleButton);
+      parent.insertBefore(divider, bubbleButton);
     }
   }
 
@@ -715,24 +613,36 @@
 
     for (var i = 0; i < settingsLinks.length; i++) {
       var link = settingsLinks[i];
-      var instanceCandidate = parseInstanceIdFromHref(link.getAttribute("href"));
-      if (!instanceCandidate) continue;
+      var candidate = parseInstanceIdFromHref(link.getAttribute("href"));
+      if (!candidate) continue;
 
       var parent = link.parentElement;
       if (!parent) continue;
 
-      var already = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
-      if (already) continue;
+      var existing = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
+      if (existing) continue;
 
-      var icon = createIconButton(instanceCandidate, link);
+      var icon = createIconButton(candidate, link);
+      if (isUUID(candidate)) icon.setAttribute("data-cw-instance-id", candidate);
       parent.insertBefore(icon, link);
     }
   }
 
-  function ensureUI() {
-    ensureIconLeftOfBlueBubble();
-    ensureFallbackIconNearSettings();
-    ensureSettingsPanel();
+  function safeEnsureUI() {
+    try {
+      ensureIconLeftOfBlueBubble();
+      ensureFallbackIconNearSettings();
+    } catch (_e) {}
+  }
+
+  var ensureScheduled = false;
+  function scheduleEnsureUI() {
+    if (ensureScheduled) return;
+    ensureScheduled = true;
+    setTimeout(function () {
+      ensureScheduled = false;
+      safeEnsureUI();
+    }, 40);
   }
 
   function installRouteObserver() {
@@ -753,21 +663,30 @@
       window.dispatchEvent(new Event("locationchange"));
     });
 
-    window.addEventListener("locationchange", ensureUI);
+    window.addEventListener("locationchange", scheduleEnsureUI);
   }
 
   function installDOMObserver() {
-    if (!window.MutationObserver) return;
+    if (!window.MutationObserver || !document.body) return;
 
     var observer = new MutationObserver(function () {
-      ensureUI();
+      scheduleEnsureUI();
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  installRouteObserver();
-  installDOMObserver();
-  setInterval(ensureUI, 1200);
-  ensureUI();
+  function start() {
+    ensureModal();
+    installRouteObserver();
+    installDOMObserver();
+    setInterval(scheduleEnsureUI, 1200);
+    scheduleEnsureUI();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
 })();
