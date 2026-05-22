@@ -5,7 +5,8 @@
   var MODAL_ID = "cw-instance-settings-modal";
 
   function parseInstanceId() {
-    var m = window.location.pathname.match(/\/manager\/instances\/([^/]+)\/settings/);
+    var pathname = window.location.pathname || "";
+    var m = pathname.match(/\/instances\/([^\/?#]+)(?:\/settings)?(?:\/|$)/i);
     return m ? decodeURIComponent(m[1]) : "";
   }
 
