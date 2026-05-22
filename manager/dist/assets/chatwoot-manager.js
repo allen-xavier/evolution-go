@@ -1,17 +1,32 @@
-ï»¿(function () {
+(function () {
   "use strict";
 
   var ACTION_ICON_ATTR = "data-cw-chatwoot-icon";
-  var MODAL_ID = "cw-instance-chatwoot-modal";
+  var PANEL_ID = "cw-instance-chatwoot-panel";
+  var PANEL_MARKER_ATTR = "data-cw-chatwoot-root";
+  var SETTINGS_QUERY_KEY = "chatwoot";
   var ACTIVE_INSTANCE_ID = "";
+
+  var instancesCache = {
+    at: 0,
+    rows: [],
+    byKey: {},
+  };
 
   function qs(root, selector) {
     return root.querySelector(selector);
   }
 
+  function qsa(root, selector) {
+    return root.querySelectorAll(selector);
+  }
+
   function parseInstanceIdFromPath(pathname) {
-    var m = (pathname || "").match(/\/instances\/([^\/?#]+)(?:\/settings)?(?:\/|$)/i);
-    return m ? decodeURIComponent(m[1]) : "";
+    var m = (pathname || "").match(/\/instances\/([^\/?#]+)\/settings(?:\/|$)/i);
+    if (m) return decodeURIComponent(m[1]);
+
+    var fallback = (pathname || "").match(/\/instances\/([^\/?#]+)(?:\/|$)/i);
+    return fallback ? decodeURIComponent(fallback[1]) : "";
   }
 
   function parseInstanceIdFromHref(href) {
@@ -22,6 +37,14 @@
     } catch (_e) {
       return parseInstanceIdFromPath(String(href));
     }
+  }
+
+  function isUUID(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+  }
+
+  function normalizeStr(value) {
+    return String(value || "").trim().toLowerCase();
   }
 
   function detectApiKey() {
@@ -76,31 +99,86 @@
     return window.location.origin.replace(/\/$/, "");
   }
 
-  function resolveInstanceIdFromElement(el) {
-    var node = el;
-    for (var i = 0; i < 8 && node; i++) {
-      if (node.getAttribute) {
-        var explicit = node.getAttribute("data-cw-instance-id") || node.getAttribute("data-instance-id");
-        if (explicit) return explicit;
-      }
+  function normalizeInstanceRow(raw) {
+    if (!raw || typeof raw !== "object") return null;
 
-      if (node.querySelector) {
-        var link = node.querySelector('a[href*="/manager/instances/"][href*="/settings"]');
-        if (link) {
-          var fromHref = parseInstanceIdFromHref(link.getAttribute("href"));
-          if (fromHref) return fromHref;
-        }
-      }
+    var id = raw.id || raw.instanceId || raw.instanceID || "";
+    var instanceName = raw.instanceName || raw.name || raw.instance || "";
+    var profileName = raw.profileName || raw.profile_name || "";
 
-      node = node.parentElement;
+    return {
+      id: String(id || "").trim(),
+      instanceName: String(instanceName || "").trim(),
+      profileName: String(profileName || "").trim(),
+    };
+  }
+
+  function indexInstanceRows(rows) {
+    var index = {};
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!row) continue;
+
+      var keys = [row.id, row.instanceName, row.profileName];
+      for (var k = 0; k < keys.length; k++) {
+        var key = normalizeStr(keys[k]);
+        if (key) index[key] = row;
+      }
+    }
+    return index;
+  }
+
+  async function fetchInstances() {
+    var now = Date.now();
+    if (instancesCache.rows.length && now - instancesCache.at < 15000) {
+      return instancesCache.rows;
     }
 
-    var card = findInstanceCard(el);
-    var fromCard = readInstanceNameFromCard(card);
-    if (fromCard) return fromCard;
+    var apiKey = detectApiKey();
+    if (!apiKey) return instancesCache.rows || [];
 
-    var current = parseInstanceIdFromPath(window.location.pathname || "");
-    return current || "";
+    try {
+      var resp = await fetch("/instance/all", {
+        method: "GET",
+        headers: { apikey: apiKey },
+      });
+
+      var body = {};
+      try {
+        body = await resp.json();
+      } catch (_e) {}
+
+      if (!resp.ok) return instancesCache.rows || [];
+
+      var data = Array.isArray(body) ? body : Array.isArray(body.data) ? body.data : [];
+      var rows = [];
+      for (var i = 0; i < data.length; i++) {
+        var normalized = normalizeInstanceRow(data[i]);
+        if (normalized) rows.push(normalized);
+      }
+
+      instancesCache = {
+        at: now,
+        rows: rows,
+        byKey: indexInstanceRows(rows),
+      };
+
+      return rows;
+    } catch (_e) {
+      return instancesCache.rows || [];
+    }
+  }
+
+  async function resolveInstanceIdSmart(candidate) {
+    var raw = String(candidate || "").trim();
+    if (!raw) return "";
+    if (isUUID(raw)) return raw;
+
+    await fetchInstances();
+    var hit = instancesCache.byKey[normalizeStr(raw)];
+    if (hit && hit.id) return hit.id;
+
+    return raw;
   }
 
   function findInstanceCard(el) {
@@ -130,151 +208,220 @@
     return "";
   }
 
-  function createModal() {
-    var old = document.getElementById(MODAL_ID);
-    if (old) old.remove();
+  function resolveInstanceIdFromElement(el) {
+    var node = el;
+    for (var i = 0; i < 8 && node; i++) {
+      if (node.getAttribute) {
+        var explicit = node.getAttribute("data-cw-instance-id") || node.getAttribute("data-instance-id");
+        if (explicit) return explicit;
+      }
 
-    var modal = document.createElement("div");
-    modal.id = MODAL_ID;
-    modal.style.cssText = [
-      "position:fixed",
-      "inset:0",
-      "display:none",
-      "background:rgba(15,23,42,.55)",
-      "z-index:999999",
-      "align-items:center",
-      "justify-content:center",
-      "padding:16px",
-      "font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
-    ].join(";");
+      if (node.querySelector) {
+        var link = node.querySelector('a[href*="/manager/instances/"][href*="/settings"]');
+        if (link) {
+          var fromHref = parseInstanceIdFromHref(link.getAttribute("href"));
+          if (fromHref) return fromHref;
+        }
+      }
 
-    modal.innerHTML =
-      '<div style="width:min(920px,95vw);max-height:92vh;overflow:auto;background:#fff;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);padding:16px 18px;">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">' +
-      '<h3 style="margin:0;font-size:18px;color:#0f172a;">Chatwoot da Instancia</h3>' +
-      '<button id="cw-close" type="button" style="border:none;background:#e2e8f0;color:#0f172a;border-radius:8px;padding:6px 10px;cursor:pointer;">Fechar</button>' +
-      '</div>' +
-      '<p style="margin:0 0 12px;color:#475569;font-size:13px;">Configuracao por instancia com sincronizacao bidirecional de mensagens e midia.</p>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-enabled" type="checkbox"/> <span>Habilitado</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-signMsg" type="checkbox"/> <span>Assinar mensagem</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-reopenConversation" type="checkbox"/> <span>Reabrir conversa</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-conversationPending" type="checkbox"/> <span>Conversa pendente</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-mergeBrazilContacts" type="checkbox"/> <span>Mesclar contatos BR</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-importContacts" type="checkbox"/> <span>Importar contatos</span></label>' +
-      '<label style="display:flex;gap:8px;align-items:center;"><input id="cw-importMessages" type="checkbox"/> <span>Importar mensagens</span></label>' +
-      '</div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px;">' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">URL Chatwoot</div><input id="cw-url" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="https://chatwoot.seudominio.com"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Account ID</div><input id="cw-accountId" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="1"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Token API</div><input id="cw-token" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="api_access_token"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Inbox ID (Caixa)</div><input id="cw-inboxId" type="number" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="10"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Inbox Identifier (opcional)</div><input id="cw-inboxIdentifier" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="opcional"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Nome Inbox</div><input id="cw-nameInbox" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="Suporte WhatsApp"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Organizacao</div><input id="cw-organization" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="Minha Empresa"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Logo (URL)</div><input id="cw-logo" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="https://..."/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Dias limite importacao</div><input id="cw-daysLimitImportMessages" type="number" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" value="3"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Delimitador assinatura</div><input id="cw-signDelimiter" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" value="\\n"/></div>' +
-      '<div><div style="font-size:12px;color:#334155;margin-bottom:4px;">Webhook Secret (opcional)</div><input id="cw-webhookSecret" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px"/></div>' +
-      '</div>' +
-      '<div style="margin-top:10px;">' +
-      '<div style="font-size:12px;color:#334155;margin-bottom:4px;">Ignore JIDs (um por linha)</div>' +
-      '<textarea id="cw-ignoreJids" rows="4" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:8px" placeholder="5511999998888@s.whatsapp.net"></textarea>' +
-      '</div>' +
-      '<div style="margin-top:10px;padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc;">' +
-      '<div style="font-size:12px;color:#334155;margin-bottom:4px;">Webhook URL para configurar no Chatwoot</div>' +
-      '<code id="cw-webhookUrl" style="display:block;word-break:break-all;color:#0f172a;font-size:12px;"></code>' +
-      '</div>' +
-      '<div style="margin-top:12px;display:flex;gap:8px;align-items:center;justify-content:flex-end;">' +
-      '<span id="cw-status" style="font-size:12px;color:#334155;flex:1 1 auto;"></span>' +
-      '<button id="cw-load" type="button" style="border:none;background:#e2e8f0;color:#0f172a;border-radius:8px;padding:8px 10px;cursor:pointer;">Recarregar</button>' +
-      '<button id="cw-save" type="button" style="border:none;background:#0ea5e9;color:#fff;border-radius:8px;padding:8px 12px;cursor:pointer;">Salvar</button>' +
-      '</div>' +
-      '</div>';
+      node = node.parentElement;
+    }
 
-    document.body.appendChild(modal);
-    return modal;
+    var card = findInstanceCard(el);
+    var fromCard = readInstanceNameFromCard(card);
+    if (fromCard) return fromCard;
+
+    var current = parseInstanceIdFromPath(window.location.pathname || "");
+    return current || "";
   }
 
-  function ensureModal() {
-    var modal = document.getElementById(MODAL_ID);
-    if (modal) return modal;
-
-    modal = createModal();
-
-    qs(modal, "#cw-close").addEventListener("click", function () {
-      modal.style.display = "none";
-    });
-
-    modal.addEventListener("click", function (ev) {
-      if (ev.target === modal) modal.style.display = "none";
-    });
-
-    qs(modal, "#cw-load").onclick = function () {
-      if (!ACTIVE_INSTANCE_ID) return;
-      loadConfig(modal, ACTIVE_INSTANCE_ID);
-    };
-
-    qs(modal, "#cw-save").onclick = function () {
-      if (!ACTIVE_INSTANCE_ID) return;
-      saveConfig(modal, ACTIVE_INSTANCE_ID);
-    };
-
-    return modal;
+  function isOnInstanceSettingsPage() {
+    return /\/manager\/instances\/[^\/?#]+\/settings(?:\/|$)/i.test(window.location.pathname || "");
   }
 
-  function setStatus(modal, text, isError) {
-    var node = qs(modal, "#cw-status");
+  function shouldShowChatwootPanel() {
+    if (!isOnInstanceSettingsPage()) return false;
+
+    var params = new URLSearchParams(window.location.search || "");
+    if (!params.has(SETTINGS_QUERY_KEY)) return false;
+
+    var value = (params.get(SETTINGS_QUERY_KEY) || "").trim().toLowerCase();
+    return value === "" || value === "1" || value === "true" || value === "yes";
+  }
+
+  function goToInstanceChatwootSettings(instanceId) {
+    if (!instanceId) return;
+
+    var params = new URLSearchParams(window.location.search || "");
+    params.set(SETTINGS_QUERY_KEY, "1");
+
+    var target =
+      "/manager/instances/" +
+      encodeURIComponent(instanceId) +
+      "/settings" +
+      (params.toString() ? "?" + params.toString() : "");
+
+    if (window.location.pathname + window.location.search === target) {
+      window.dispatchEvent(new Event("locationchange"));
+      return;
+    }
+
+    history.pushState({}, "", target);
+    window.dispatchEvent(new Event("locationchange"));
+  }
+
+  function closeChatwootPanelQuery() {
+    if (!isOnInstanceSettingsPage()) return;
+
+    var params = new URLSearchParams(window.location.search || "");
+    if (!params.has(SETTINGS_QUERY_KEY)) return;
+
+    params.delete(SETTINGS_QUERY_KEY);
+
+    var target = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
+    history.pushState({}, "", target);
+    window.dispatchEvent(new Event("locationchange"));
+  }
+
+  function panelHTML() {
+    return (
+      '<div class="flex items-center justify-between gap-3 mb-4">' +
+      '<div class="flex items-center gap-2">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="color:#1f93ff;">' +
+      '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
+      '</svg>' +
+      '<h2 class="text-lg font-semibold text-foreground">Integração Chatwoot</h2>' +
+      '</div>' +
+      '<button id="cw-close-page" type="button" class="inline-flex items-center rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent">Fechar</button>' +
+      '</div>' +
+      '<p class="text-sm text-muted-foreground mb-4">Configuração por instância com sincronização bidirecional de mensagens e mídia.</p>' +
+      '<div class="mb-4 rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground">' +
+      '<strong class="text-foreground">Instância ID:</strong> <span id="cw-instance-id-label">-</span>' +
+      '</div>' +
+      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-enabled" type="checkbox" class="rounded border-input w-4 h-4"/> Habilitado</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-signMsg" type="checkbox" class="rounded border-input w-4 h-4"/> Assinar mensagem</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-reopenConversation" type="checkbox" class="rounded border-input w-4 h-4"/> Reabrir conversa</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-conversationPending" type="checkbox" class="rounded border-input w-4 h-4"/> Conversa pendente</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-mergeBrazilContacts" type="checkbox" class="rounded border-input w-4 h-4"/> Mesclar contatos BR</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-importContacts" type="checkbox" class="rounded border-input w-4 h-4"/> Importar contatos</label>' +
+      '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-importMessages" type="checkbox" class="rounded border-input w-4 h-4"/> Importar mensagens</label>' +
+      '</div>' +
+      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">URL Chatwoot</label><input id="cw-url" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="https://chatwoot.seudominio.com"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Account ID</label><input id="cw-accountId" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="1"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Token API</label><input id="cw-token" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="api_access_token"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox ID (Caixa)</label><input id="cw-inboxId" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="10"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox Identifier (opcional)</label><input id="cw-inboxIdentifier" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="opcional"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Nome Inbox</label><input id="cw-nameInbox" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Suporte WhatsApp"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Organização</label><input id="cw-organization" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Minha Empresa"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Logo (URL)</label><input id="cw-logo" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="https://..."/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Dias limite importação</label><input id="cw-daysLimitImportMessages" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="3"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Delimitador assinatura</label><input id="cw-signDelimiter" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="\\n"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Webhook Secret (opcional)</label><input id="cw-webhookSecret" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground"/></div>' +
+      '</div>' +
+      '<div class="mt-4">' +
+      '<label class="block text-sm font-medium text-foreground mb-1">Ignore JIDs (um por linha)</label>' +
+      '<textarea id="cw-ignoreJids" rows="4" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="5511999998888@s.whatsapp.net"></textarea>' +
+      '</div>' +
+      '<div class="mt-4 rounded-md border border-input bg-background px-3 py-2">' +
+      '<div class="text-sm font-medium text-foreground mb-1">Webhook URL para configurar no Chatwoot</div>' +
+      '<code id="cw-webhookUrl" class="block break-all text-xs text-muted-foreground"></code>' +
+      '</div>' +
+      '<div class="mt-4 flex items-center justify-end gap-2">' +
+      '<span id="cw-status" class="text-xs text-muted-foreground mr-auto"></span>' +
+      '<button id="cw-load" type="button" class="inline-flex items-center rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent">Recarregar</button>' +
+      '<button id="cw-save" type="button" class="inline-flex items-center rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90">Salvar</button>' +
+      '</div>'
+    );
+  }
+
+  function createPanel() {
+    var panel = document.createElement("div");
+    panel.id = PANEL_ID;
+    panel.setAttribute(PANEL_MARKER_ATTR, "1");
+    panel.className = "rounded-lg border border-sidebar-border bg-card p-6";
+    panel.innerHTML = panelHTML();
+    return panel;
+  }
+
+  function bindPanel(panel) {
+    var closeBtn = qs(panel, "#cw-close-page");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", function () {
+        closeChatwootPanelQuery();
+      });
+    }
+
+    var loadBtn = qs(panel, "#cw-load");
+    if (loadBtn) {
+      loadBtn.onclick = function () {
+        if (!ACTIVE_INSTANCE_ID) return;
+        loadConfig(panel, ACTIVE_INSTANCE_ID);
+      };
+    }
+
+    var saveBtn = qs(panel, "#cw-save");
+    if (saveBtn) {
+      saveBtn.onclick = function () {
+        if (!ACTIVE_INSTANCE_ID) return;
+        saveConfig(panel, ACTIVE_INSTANCE_ID);
+      };
+    }
+  }
+
+  function setStatus(root, text, isError) {
+    var node = qs(root, "#cw-status");
     if (!node) return;
     node.textContent = text || "";
-    node.style.color = isError ? "#dc2626" : "#0f766e";
+    node.style.color = isError ? "#ef4444" : "";
   }
 
-  function fillForm(modal, data) {
+  function fillForm(root, data) {
     data = data || {};
-    qs(modal, "#cw-enabled").checked = !!data.enabled;
-    qs(modal, "#cw-signMsg").checked = !!data.signMsg;
-    qs(modal, "#cw-reopenConversation").checked = !!data.reopenConversation;
-    qs(modal, "#cw-conversationPending").checked = !!data.conversationPending;
-    qs(modal, "#cw-mergeBrazilContacts").checked = !!data.mergeBrazilContacts;
-    qs(modal, "#cw-importContacts").checked = !!data.importContacts;
-    qs(modal, "#cw-importMessages").checked = !!data.importMessages;
+    qs(root, "#cw-enabled").checked = !!data.enabled;
+    qs(root, "#cw-signMsg").checked = !!data.signMsg;
+    qs(root, "#cw-reopenConversation").checked = !!data.reopenConversation;
+    qs(root, "#cw-conversationPending").checked = !!data.conversationPending;
+    qs(root, "#cw-mergeBrazilContacts").checked = !!data.mergeBrazilContacts;
+    qs(root, "#cw-importContacts").checked = !!data.importContacts;
+    qs(root, "#cw-importMessages").checked = !!data.importMessages;
 
-    qs(modal, "#cw-url").value = data.url || "";
-    qs(modal, "#cw-accountId").value = data.accountId || "";
-    qs(modal, "#cw-token").value = data.token || "";
-    qs(modal, "#cw-inboxId").value = data.inboxId || "";
-    qs(modal, "#cw-inboxIdentifier").value = data.inboxIdentifier || "";
-    qs(modal, "#cw-nameInbox").value = data.nameInbox || "";
-    qs(modal, "#cw-organization").value = data.organization || "";
-    qs(modal, "#cw-logo").value = data.logo || "";
-    qs(modal, "#cw-daysLimitImportMessages").value = data.daysLimitImportMessages || 3;
-    qs(modal, "#cw-signDelimiter").value = data.signDelimiter || "\\n";
-    qs(modal, "#cw-webhookSecret").value = data.webhookSecret || "";
-    qs(modal, "#cw-ignoreJids").value = Array.isArray(data.ignoreJids) ? data.ignoreJids.join("\n") : "";
+    qs(root, "#cw-url").value = data.url || "";
+    qs(root, "#cw-accountId").value = data.accountId || "";
+    qs(root, "#cw-token").value = data.token || "";
+    qs(root, "#cw-inboxId").value = data.inboxId || "";
+    qs(root, "#cw-inboxIdentifier").value = data.inboxIdentifier || "";
+    qs(root, "#cw-nameInbox").value = data.nameInbox || "";
+    qs(root, "#cw-organization").value = data.organization || "";
+    qs(root, "#cw-logo").value = data.logo || "";
+    qs(root, "#cw-daysLimitImportMessages").value = data.daysLimitImportMessages || 3;
+    qs(root, "#cw-signDelimiter").value = data.signDelimiter || "\\n";
+    qs(root, "#cw-webhookSecret").value = data.webhookSecret || "";
+    qs(root, "#cw-ignoreJids").value = Array.isArray(data.ignoreJids) ? data.ignoreJids.join("\n") : "";
   }
 
-  function readForm(modal) {
+  function readForm(root) {
     return {
-      enabled: qs(modal, "#cw-enabled").checked,
-      signMsg: qs(modal, "#cw-signMsg").checked,
-      reopenConversation: qs(modal, "#cw-reopenConversation").checked,
-      conversationPending: qs(modal, "#cw-conversationPending").checked,
-      mergeBrazilContacts: qs(modal, "#cw-mergeBrazilContacts").checked,
-      importContacts: qs(modal, "#cw-importContacts").checked,
-      importMessages: qs(modal, "#cw-importMessages").checked,
-      url: qs(modal, "#cw-url").value.trim(),
-      accountId: qs(modal, "#cw-accountId").value.trim(),
-      token: qs(modal, "#cw-token").value.trim(),
-      inboxId: Number(qs(modal, "#cw-inboxId").value || 0),
-      inboxIdentifier: qs(modal, "#cw-inboxIdentifier").value.trim(),
-      nameInbox: qs(modal, "#cw-nameInbox").value.trim(),
-      organization: qs(modal, "#cw-organization").value.trim(),
-      logo: qs(modal, "#cw-logo").value.trim(),
-      daysLimitImportMessages: Number(qs(modal, "#cw-daysLimitImportMessages").value || 3),
-      signDelimiter: qs(modal, "#cw-signDelimiter").value || "\\n",
-      webhookSecret: qs(modal, "#cw-webhookSecret").value.trim(),
-      ignoreJids: qs(modal, "#cw-ignoreJids")
+      enabled: qs(root, "#cw-enabled").checked,
+      signMsg: qs(root, "#cw-signMsg").checked,
+      reopenConversation: qs(root, "#cw-reopenConversation").checked,
+      conversationPending: qs(root, "#cw-conversationPending").checked,
+      mergeBrazilContacts: qs(root, "#cw-mergeBrazilContacts").checked,
+      importContacts: qs(root, "#cw-importContacts").checked,
+      importMessages: qs(root, "#cw-importMessages").checked,
+      url: qs(root, "#cw-url").value.trim(),
+      accountId: qs(root, "#cw-accountId").value.trim(),
+      token: qs(root, "#cw-token").value.trim(),
+      inboxId: Number(qs(root, "#cw-inboxId").value || 0),
+      inboxIdentifier: qs(root, "#cw-inboxIdentifier").value.trim(),
+      nameInbox: qs(root, "#cw-nameInbox").value.trim(),
+      organization: qs(root, "#cw-organization").value.trim(),
+      logo: qs(root, "#cw-logo").value.trim(),
+      daysLimitImportMessages: Number(qs(root, "#cw-daysLimitImportMessages").value || 3),
+      signDelimiter: qs(root, "#cw-signDelimiter").value || "\\n",
+      webhookSecret: qs(root, "#cw-webhookSecret").value.trim(),
+      ignoreJids: qs(root, "#cw-ignoreJids")
         .value.split("\n")
         .map(function (v) {
           return v.trim();
@@ -283,14 +430,14 @@
     };
   }
 
-  async function loadConfig(modal, instanceId) {
+  async function loadConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(modal, "API key nao encontrada no manager.", true);
+      setStatus(root, "API key não encontrada no manager.", true);
       return;
     }
 
-    setStatus(modal, "Carregando configuracao...", false);
+    setStatus(root, "Carregando configuração...", false);
     var resp = await fetch("/chatwoot/find/" + encodeURIComponent(instanceId), {
       method: "GET",
       headers: { apikey: apiKey },
@@ -302,24 +449,24 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao carregar configuracao";
-      setStatus(modal, msg, true);
+      var msg = (data && data.error) || "Falha ao carregar configuração";
+      setStatus(root, msg, true);
       return;
     }
 
-    fillForm(modal, data.data || {});
-    setStatus(modal, "Configuracao carregada.", false);
+    fillForm(root, data.data || {});
+    setStatus(root, "Configuração carregada.", false);
   }
 
-  async function saveConfig(modal, instanceId) {
+  async function saveConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(modal, "API key nao encontrada no manager.", true);
+      setStatus(root, "API key não encontrada no manager.", true);
       return;
     }
 
-    var payload = readForm(modal);
-    setStatus(modal, "Salvando...", false);
+    var payload = readForm(root);
+    setStatus(root, "Salvando...", false);
 
     var resp = await fetch("/chatwoot/set/" + encodeURIComponent(instanceId), {
       method: "POST",
@@ -336,36 +483,75 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao salvar configuracao";
-      setStatus(modal, msg, true);
+      var msg = (data && data.error) || "Falha ao salvar configuração";
+      setStatus(root, msg, true);
       return;
     }
 
-    fillForm(modal, (data && data.data) || payload);
-    setStatus(modal, "Configuracao salva com sucesso.", false);
+    fillForm(root, (data && data.data) || payload);
+    setStatus(root, "Configuração salva com sucesso.", false);
   }
 
-  function openModalForInstance(instanceId) {
-    if (!instanceId) return;
+  function findSettingsContentContainer() {
+    return (
+      document.querySelector("div.max-w-4xl.mx-auto.space-y-6") ||
+      document.querySelector(".flex-1.overflow-y-auto.p-6 .max-w-4xl") ||
+      document.querySelector(".flex-1.overflow-y-auto.p-6")
+    );
+  }
 
-    ACTIVE_INSTANCE_ID = instanceId;
-    var modal = ensureModal();
+  function removePanelIfExists() {
+    var panel = document.getElementById(PANEL_ID);
+    if (panel) panel.remove();
+  }
 
-    var baseURL = detectApiBaseURL();
-    var webhookNode = qs(modal, "#cw-webhookUrl");
-    if (webhookNode) {
-      webhookNode.textContent = baseURL + "/chatwoot/webhook/" + encodeURIComponent(instanceId);
+  async function ensureSettingsPanel() {
+    if (!shouldShowChatwootPanel()) {
+      removePanelIfExists();
+      return;
     }
 
-    modal.style.display = "flex";
-    loadConfig(modal, instanceId);
+    var container = findSettingsContentContainer();
+    if (!container) return;
+
+    var panel = document.getElementById(PANEL_ID);
+    if (!panel) {
+      panel = createPanel();
+      if (container.firstChild) {
+        container.insertBefore(panel, container.firstChild);
+      } else {
+        container.appendChild(panel);
+      }
+      bindPanel(panel);
+    }
+
+    var currentPathInstance = parseInstanceIdFromPath(window.location.pathname || "");
+    var resolvedInstance = await resolveInstanceIdSmart(currentPathInstance);
+    var finalInstance = resolvedInstance || currentPathInstance;
+    if (!finalInstance) return;
+
+    var label = qs(panel, "#cw-instance-id-label");
+    if (label) label.textContent = finalInstance;
+
+    var current = panel.getAttribute("data-cw-instance-id") || "";
+    if (current === finalInstance) return;
+
+    panel.setAttribute("data-cw-instance-id", finalInstance);
+    ACTIVE_INSTANCE_ID = finalInstance;
+
+    var webhookNode = qs(panel, "#cw-webhookUrl");
+    if (webhookNode) {
+      webhookNode.textContent = detectApiBaseURL() + "/chatwoot/webhook/" + encodeURIComponent(finalInstance);
+    }
+
+    loadConfig(panel, finalInstance);
   }
 
-  function createIconButton(instanceId, referenceEl) {
+  function createIconButton(instanceCandidate, referenceEl) {
     var btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute(ACTION_ICON_ATTR, "1");
-    if (instanceId) btn.setAttribute("data-cw-instance-id", instanceId);
+    if (instanceCandidate) btn.setAttribute("data-cw-instance-id", instanceCandidate);
     btn.setAttribute("title", "Chatwoot");
     btn.setAttribute("aria-label", "Chatwoot");
 
@@ -386,27 +572,29 @@
     }
 
     btn.style.marginRight = "6px";
-    btn.style.color = "#22c55e";
+    btn.style.color = "#1f93ff";
     btn.innerHTML =
-      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
-      '<path d="M5 16.2V5.8A2.8 2.8 0 0 1 7.8 3h8.4A2.8 2.8 0 0 1 19 5.8v6.4A2.8 2.8 0 0 1 16.2 15H9l-4 3.6v-2.4z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>' +
-      '<circle cx="10" cy="9" r="1" fill="currentColor"></circle>' +
-      '<circle cx="13" cy="9" r="1" fill="currentColor"></circle>' +
-      '<circle cx="16" cy="9" r="1" fill="currentColor"></circle>' +
-      "</svg>";
+      '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
+      '</svg>';
 
-    btn.onclick = function (ev) {
+    btn.onclick = async function (ev) {
       ev.preventDefault();
       ev.stopPropagation();
-      var dynamicInstanceId =
-        instanceId ||
+
+      var dynamicCandidate =
+        instanceCandidate ||
         resolveInstanceIdFromElement(btn) ||
         readInstanceNameFromCard(findInstanceCard(btn)) ||
         "";
 
-      if (!dynamicInstanceId) return;
-      btn.setAttribute("data-cw-instance-id", dynamicInstanceId);
-      openModalForInstance(dynamicInstanceId);
+      if (!dynamicCandidate) return;
+
+      var resolved = await resolveInstanceIdSmart(dynamicCandidate);
+      if (!resolved) return;
+
+      btn.setAttribute("data-cw-instance-id", resolved);
+      goToInstanceChatwootSettings(resolved);
     };
 
     return btn;
@@ -433,10 +621,9 @@
       var parent = bubbleButton.parentElement;
       if (!parent) continue;
 
-      var instanceId = resolveInstanceIdFromElement(parent);
-      var existing = instanceId
-        ? parent.querySelector("[" + ACTION_ICON_ATTR + '][data-cw-instance-id="' + instanceId + '"]')
-        : parent.querySelector("[" + ACTION_ICON_ATTR + "]");
+      var instanceCandidate = resolveInstanceIdFromElement(parent);
+      var existing = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
+
       if (existing) {
         if (existing.nextSibling !== bubbleButton) {
           parent.insertBefore(existing, bubbleButton);
@@ -444,7 +631,7 @@
         continue;
       }
 
-      var icon = createIconButton(instanceId, bubbleButton);
+      var icon = createIconButton(instanceCandidate, bubbleButton);
       parent.insertBefore(icon, bubbleButton);
     }
   }
@@ -454,24 +641,24 @@
 
     for (var i = 0; i < settingsLinks.length; i++) {
       var link = settingsLinks[i];
-      var instanceId = parseInstanceIdFromHref(link.getAttribute("href"));
-      if (!instanceId) continue;
+      var instanceCandidate = parseInstanceIdFromHref(link.getAttribute("href"));
+      if (!instanceCandidate) continue;
 
       var parent = link.parentElement;
       if (!parent) continue;
 
-      var already = parent.querySelector("[" + ACTION_ICON_ATTR + '][data-cw-instance-id="' + instanceId + '"]');
+      var already = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
       if (already) continue;
 
-      var icon = createIconButton(instanceId, link);
+      var icon = createIconButton(instanceCandidate, link);
       parent.insertBefore(icon, link);
     }
   }
 
   function ensureUI() {
-    ensureModal();
     ensureIconLeftOfBlueBubble();
     ensureFallbackIconNearSettings();
+    ensureSettingsPanel();
   }
 
   function installRouteObserver() {
@@ -507,6 +694,6 @@
 
   installRouteObserver();
   installDOMObserver();
-  setInterval(ensureUI, 1500);
+  setInterval(ensureUI, 1200);
   ensureUI();
 })();
