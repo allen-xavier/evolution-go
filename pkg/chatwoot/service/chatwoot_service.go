@@ -72,6 +72,14 @@ type chatwootContactSearchResponse struct {
 	} `json:"payload"`
 }
 
+type chatwootContactConversationsResponse struct {
+	Payload []struct {
+		ID       int    `json:"id"`
+		InboxID  int    `json:"inbox_id"`
+		SourceID string `json:"source_id"`
+	} `json:"payload"`
+}
+
 type chatwootHTTPError struct {
 	StatusCode int
 	Body       string
@@ -335,6 +343,14 @@ func (s *chatwootService) SyncWhatsAppMessage(instance *instance_model.Instance,
 	if evt.Info.IsFromMe {
 		messageType = "outgoing"
 	}
+	messageSourceID := strings.TrimSpace(evt.Info.ID)
+	if messageSourceID != "" {
+		if evt.Info.IsFromMe {
+			messageSourceID = "wa-out:" + messageSourceID
+		} else {
+			messageSourceID = "wa-in:" + messageSourceID
+		}
+	}
 
 	binding, err := s.getOrCreateBinding(instance, cfg, evt)
 	if err != nil {
@@ -355,7 +371,7 @@ func (s *chatwootService) SyncWhatsAppMessage(instance *instance_model.Instance,
 		if strings.TrimSpace(content) == "" {
 			content = "[message]"
 		}
-		if err := s.sendMessageToChatwoot(cfg, binding, content, messageType, nil, ""); err != nil {
+		if err := s.sendMessageToChatwoot(cfg, binding, content, messageType, messageSourceID, nil, ""); err != nil {
 			s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync message to Chatwoot: %v", instance.Id, err)
 		}
 		return
@@ -365,7 +381,7 @@ func (s *chatwootService) SyncWhatsAppMessage(instance *instance_model.Instance,
 		content = fmt.Sprintf("[%s]", mediaType)
 	}
 
-	if err := s.sendMessageToChatwoot(cfg, binding, content, messageType, mediaData, mediaType); err != nil {
+	if err := s.sendMessageToChatwoot(cfg, binding, content, messageType, messageSourceID, mediaData, mediaType); err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync media message to Chatwoot: %v", instance.Id, err)
 	}
 }
@@ -523,6 +539,14 @@ func (s *chatwootService) createChatwootConversation(cfg *chatwoot_model.Chatwoo
 
 	respBody, err := s.chatwootRequestJSON(http.MethodPost, cfg, fmt.Sprintf("/api/v1/accounts/%s/conversations", cfg.AccountID), body)
 	if err != nil {
+		var httpErr *chatwootHTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnprocessableEntity {
+			// Conversation may already exist for this contact/source_id.
+			existingID, lookupErr := s.findExistingConversationID(cfg, contactID, sourceID)
+			if lookupErr == nil && existingID > 0 {
+				return existingID, nil
+			}
+		}
 		return 0, err
 	}
 
@@ -534,6 +558,34 @@ func (s *chatwootService) createChatwootConversation(cfg *chatwoot_model.Chatwoo
 		return 0, fmt.Errorf("chatwoot conversation id not found in response")
 	}
 	return resp.ID, nil
+}
+
+func (s *chatwootService) findExistingConversationID(cfg *chatwoot_model.ChatwootConfig, contactID int, sourceID string) (int, error) {
+	route := fmt.Sprintf("/api/v1/accounts/%s/contacts/%d/conversations", cfg.AccountID, contactID)
+	respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	var resp chatwootContactConversationsResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return 0, err
+	}
+
+	trimmedSourceID := strings.TrimSpace(sourceID)
+	for _, item := range resp.Payload {
+		if item.ID <= 0 {
+			continue
+		}
+		if cfg.InboxID > 0 && item.InboxID != 0 && item.InboxID != cfg.InboxID {
+			continue
+		}
+		if trimmedSourceID == "" || strings.EqualFold(strings.TrimSpace(item.SourceID), trimmedSourceID) {
+			return item.ID, nil
+		}
+	}
+
+	return 0, nil
 }
 
 func (s *chatwootService) createChatwootContactInbox(cfg *chatwoot_model.ChatwootConfig, contactID int, sourceID string) error {
@@ -570,6 +622,7 @@ func (s *chatwootService) sendMessageToChatwoot(
 	binding *chatwoot_model.ChatwootBinding,
 	content string,
 	messageType string,
+	messageSourceID string,
 	media []byte,
 	mediaType string,
 ) error {
@@ -580,13 +633,15 @@ func (s *chatwootService) sendMessageToChatwoot(
 			"content":      content,
 			"message_type": messageType,
 			"private":      false,
-			"source_id":    binding.SourceID,
+		}
+		if strings.TrimSpace(messageSourceID) != "" {
+			body["source_id"] = messageSourceID
 		}
 		_, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, body)
 		return err
 	}
 
-	return s.chatwootRequestMultipart(cfg, route, content, messageType, media, mediaType)
+	return s.chatwootRequestMultipart(cfg, route, content, messageType, messageSourceID, media, mediaType)
 }
 
 func (s *chatwootService) sendTextFromChatwoot(
@@ -835,6 +890,7 @@ func (s *chatwootService) chatwootRequestMultipart(
 	route string,
 	content string,
 	messageType string,
+	messageSourceID string,
 	media []byte,
 	mediaType string,
 ) error {
@@ -850,6 +906,9 @@ func (s *chatwootService) chatwootRequestMultipart(
 	_ = writer.WriteField("message_type", messageType)
 	_ = writer.WriteField("private", "false")
 	_ = writer.WriteField("file_type", mediaType)
+	if strings.TrimSpace(messageSourceID) != "" {
+		_ = writer.WriteField("source_id", messageSourceID)
+	}
 
 	fileName := fmt.Sprintf("attachment-%d", time.Now().UnixNano())
 	part, err := writer.CreateFormFile("attachments[]", fileName)
@@ -884,11 +943,15 @@ func (s *chatwootService) chatwootRequestMultipart(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Fallback when attachment upload fails: keep text sync and preserve media metadata.
 		fallbackContent := fmt.Sprintf("%s\n[attachment:%s upload_failed]", content, mediaType)
-		_, fallbackErr := s.chatwootRequestJSON(http.MethodPost, cfg, route, map[string]interface{}{
+		fallbackBody := map[string]interface{}{
 			"content":      fallbackContent,
 			"message_type": messageType,
 			"private":      false,
-		})
+		}
+		if strings.TrimSpace(messageSourceID) != "" {
+			fallbackBody["source_id"] = messageSourceID
+		}
+		_, fallbackErr := s.chatwootRequestJSON(http.MethodPost, cfg, route, fallbackBody)
 		if fallbackErr != nil {
 			return fmt.Errorf("chatwoot multipart failed [%d]: %s", resp.StatusCode, string(respBody))
 		}
