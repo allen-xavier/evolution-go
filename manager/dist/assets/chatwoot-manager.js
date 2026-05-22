@@ -1,7 +1,8 @@
-(function () {
+Ôªø(function () {
   "use strict";
 
   var ACTION_ICON_ATTR = "data-cw-chatwoot-icon";
+  var ACTION_DIVIDER_ATTR = "data-cw-chatwoot-divider";
   var PANEL_ID = "cw-instance-chatwoot-panel";
   var PANEL_MARKER_ATTR = "data-cw-chatwoot-root";
   var SETTINGS_QUERY_KEY = "chatwoot";
@@ -266,8 +267,8 @@
       return;
     }
 
-    history.pushState({}, "", target);
-    window.dispatchEvent(new Event("locationchange"));
+    // Force full navigation so the settings page always renders.
+    window.location.assign(target);
   }
 
   function closeChatwootPanelQuery() {
@@ -290,13 +291,13 @@
       '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="color:#1f93ff;">' +
       '<path fill="currentColor" d="M0 12c0 6.629 5.371 12 12 12s12-5.371 12-12S18.629 0 12 0 0 5.371 0 12m17.008 5.29H11.44a5.57 5.57 0 0 1-5.562-5.567A5.57 5.57 0 0 1 11.44 6.16a5.57 5.57 0 0 1 5.567 5.563Z"></path>' +
       '</svg>' +
-      '<h2 class="text-lg font-semibold text-foreground">IntegraÁ„o Chatwoot</h2>' +
+      '<h2 class="text-lg font-semibold text-foreground">Integra√ß√£o Chatwoot</h2>' +
       '</div>' +
       '<button id="cw-close-page" type="button" class="inline-flex items-center rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent">Fechar</button>' +
       '</div>' +
-      '<p class="text-sm text-muted-foreground mb-4">ConfiguraÁ„o por inst‚ncia com sincronizaÁ„o bidirecional de mensagens e mÌdia.</p>' +
+      '<p class="text-sm text-muted-foreground mb-4">Configura√ß√£o por inst√¢ncia com sincroniza√ß√£o bidirecional de mensagens e m√≠dia.</p>' +
       '<div class="mb-4 rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground">' +
-      '<strong class="text-foreground">Inst‚ncia ID:</strong> <span id="cw-instance-id-label">-</span>' +
+      '<strong class="text-foreground">Inst√¢ncia ID:</strong> <span id="cw-instance-id-label">-</span>' +
       '</div>' +
       '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">' +
       '<label class="flex items-center gap-2 text-sm text-foreground"><input id="cw-enabled" type="checkbox" class="rounded border-input w-4 h-4"/> Habilitado</label>' +
@@ -314,9 +315,9 @@
       '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox ID (Caixa)</label><input id="cw-inboxId" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="10"/></div>' +
       '<div><label class="block text-sm font-medium text-foreground mb-1">Inbox Identifier (opcional)</label><input id="cw-inboxIdentifier" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="opcional"/></div>' +
       '<div><label class="block text-sm font-medium text-foreground mb-1">Nome Inbox</label><input id="cw-nameInbox" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Suporte WhatsApp"/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">OrganizaÁ„o</label><input id="cw-organization" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Minha Empresa"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Organiza√ß√£o</label><input id="cw-organization" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="Minha Empresa"/></div>' +
       '<div><label class="block text-sm font-medium text-foreground mb-1">Logo (URL)</label><input id="cw-logo" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground placeholder:text-muted-foreground" placeholder="https://..."/></div>' +
-      '<div><label class="block text-sm font-medium text-foreground mb-1">Dias limite importaÁ„o</label><input id="cw-daysLimitImportMessages" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="3"/></div>' +
+      '<div><label class="block text-sm font-medium text-foreground mb-1">Dias limite importa√ß√£o</label><input id="cw-daysLimitImportMessages" type="number" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="3"/></div>' +
       '<div><label class="block text-sm font-medium text-foreground mb-1">Delimitador assinatura</label><input id="cw-signDelimiter" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" value="\\n"/></div>' +
       '<div><label class="block text-sm font-medium text-foreground mb-1">Webhook Secret (opcional)</label><input id="cw-webhookSecret" class="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground"/></div>' +
       '</div>' +
@@ -433,11 +434,11 @@
   async function loadConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(root, "API key n„o encontrada no manager.", true);
+      setStatus(root, "API key n√£o encontrada no manager.", true);
       return;
     }
 
-    setStatus(root, "Carregando configuraÁ„o...", false);
+    setStatus(root, "Carregando configura√ß√£o...", false);
     var resp = await fetch("/chatwoot/find/" + encodeURIComponent(instanceId), {
       method: "GET",
       headers: { apikey: apiKey },
@@ -449,19 +450,19 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao carregar configuraÁ„o";
+      var msg = (data && data.error) || "Falha ao carregar configura√ß√£o";
       setStatus(root, msg, true);
       return;
     }
 
     fillForm(root, data.data || {});
-    setStatus(root, "ConfiguraÁ„o carregada.", false);
+    setStatus(root, "Configura√ß√£o carregada.", false);
   }
 
   async function saveConfig(root, instanceId) {
     var apiKey = detectApiKey();
     if (!apiKey) {
-      setStatus(root, "API key n„o encontrada no manager.", true);
+      setStatus(root, "API key n√£o encontrada no manager.", true);
       return;
     }
 
@@ -483,20 +484,22 @@
     } catch (_e) {}
 
     if (!resp.ok) {
-      var msg = (data && data.error) || "Falha ao salvar configuraÁ„o";
+      var msg = (data && data.error) || "Falha ao salvar configura√ß√£o";
       setStatus(root, msg, true);
       return;
     }
 
     fillForm(root, (data && data.data) || payload);
-    setStatus(root, "ConfiguraÁ„o salva com sucesso.", false);
+    setStatus(root, "Configura√ß√£o salva com sucesso.", false);
   }
 
   function findSettingsContentContainer() {
     return (
       document.querySelector("div.max-w-4xl.mx-auto.space-y-6") ||
+      document.querySelector('div[class*="max-w-4xl"][class*="mx-auto"]') ||
       document.querySelector(".flex-1.overflow-y-auto.p-6 .max-w-4xl") ||
-      document.querySelector(".flex-1.overflow-y-auto.p-6")
+      document.querySelector(".flex-1.overflow-y-auto.p-6") ||
+      document.querySelector("main")
     );
   }
 
@@ -600,6 +603,23 @@
     return btn;
   }
 
+  function createActionDivider(referenceEl) {
+    var divider = document.createElement("div");
+    divider.setAttribute(ACTION_DIVIDER_ATTR, "1");
+
+    var refDivider = referenceEl ? referenceEl.previousElementSibling : null;
+    var refClass = refDivider && refDivider.className ? String(refDivider.className) : "";
+    if (refClass && (refClass.indexOf("w-px") >= 0 || refClass.indexOf("bg-sidebar-border") >= 0)) {
+      divider.className = refClass;
+    } else {
+      divider.className = "w-px bg-sidebar-border";
+      divider.style.width = "1px";
+      divider.style.background = "rgba(148,163,184,.35)";
+    }
+
+    return divider;
+  }
+
   function ensureIconLeftOfBlueBubble() {
     var bubbleButtons = document.querySelectorAll(
       'button[title="Enviar mensagem de texto"], button[title*="mensagem"], button[title*="Mensagem"]'
@@ -623,16 +643,23 @@
 
       var instanceCandidate = resolveInstanceIdFromElement(parent);
       var existing = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
+      var existingDivider = parent.querySelector("[" + ACTION_DIVIDER_ATTR + "]");
 
       if (existing) {
-        if (existing.nextSibling !== bubbleButton) {
-          parent.insertBefore(existing, bubbleButton);
+        if (!existingDivider) {
+          existingDivider = createActionDivider(bubbleButton);
         }
-        continue;
-      }
 
-      var icon = createIconButton(instanceCandidate, bubbleButton);
-      parent.insertBefore(icon, bubbleButton);
+        if (existing.nextSibling !== existingDivider || existingDivider.nextSibling !== bubbleButton) {
+          parent.insertBefore(existing, bubbleButton);
+          parent.insertBefore(existingDivider, bubbleButton);
+        }
+      } else {
+        var icon = createIconButton(instanceCandidate, bubbleButton);
+        var divider = existingDivider || createActionDivider(bubbleButton);
+        parent.insertBefore(icon, bubbleButton);
+        parent.insertBefore(divider, bubbleButton);
+      }
     }
   }
 
