@@ -539,25 +539,48 @@
   }
 
   function ensureIconLeftOfBlueBubble() {
+    var anchors = [];
+    var seen = new Set();
+
     var bubbleButtons = document.querySelectorAll(
       'button[title="Enviar mensagem de texto"], button[title*="mensagem"], button[title*="Mensagem"]'
     );
-
-    if (!bubbleButtons.length) {
-      var bubblePaths = document.querySelectorAll('svg path[d*="H7l-4 4V5a2 2"]');
-      bubbleButtons = [];
-      for (var bp = 0; bp < bubblePaths.length; bp++) {
-        var fromPath = bubblePaths[bp].closest("button, a");
-        if (fromPath) bubbleButtons.push(fromPath);
-      }
+    for (var bb = 0; bb < bubbleButtons.length; bb++) {
+      anchors.push(bubbleButtons[bb]);
     }
 
-    for (var i = 0; i < bubbleButtons.length; i++) {
-      var bubbleButton = bubbleButtons[i];
-      if (!bubbleButton) continue;
+    var bubblePaths = document.querySelectorAll('svg path[d*="H7l-4 4V5a2 2"]');
+    for (var bp = 0; bp < bubblePaths.length; bp++) {
+      var fromPath = bubblePaths[bp].closest("button, a");
+      if (fromPath) anchors.push(fromPath);
+    }
 
-      var parent = bubbleButton.parentElement;
-      if (!parent) continue;
+    var settingsPaths = document.querySelectorAll('svg path[d*="M12.22 2h-.44a2 2"]');
+    for (var sp = 0; sp < settingsPaths.length; sp++) {
+      var fromSettings = settingsPaths[sp].closest("button, a");
+      if (fromSettings) anchors.push(fromSettings);
+    }
+
+    for (var i = 0; i < anchors.length; i++) {
+      var anchor = anchors[i];
+      if (!anchor || !anchor.parentElement) continue;
+
+      var parent = anchor.parentElement;
+      if (seen.has(parent)) continue;
+      seen.add(parent);
+
+      var bubbleButton = parent.querySelector(
+        'button[title="Enviar mensagem de texto"], button[title*="mensagem"], button[title*="Mensagem"]'
+      );
+      if (!bubbleButton) {
+        var bubblePathInParent = parent.querySelector('svg path[d*="H7l-4 4V5a2 2"]');
+        if (bubblePathInParent && bubblePathInParent.closest) {
+          bubbleButton = bubblePathInParent.closest("button, a");
+        }
+      }
+
+      var targetButton = bubbleButton || anchor;
+      if (!targetButton) continue;
 
       var instanceCandidate = resolveCandidateFromElement(parent);
       var existing = parent.querySelector("[" + ACTION_ICON_ATTR + "]");
@@ -569,42 +592,46 @@
         }
 
         if (instanceCandidate && !existing.getAttribute("data-cw-instance-id")) {
-          resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
-            if (resolved && isUUID(resolved) && existing && existing.setAttribute) {
-              existing.setAttribute("data-cw-instance-id", resolved);
-            }
-          });
+          (function (btnRef, candidateRef) {
+            resolveInstanceIdSmart(candidateRef).then(function (resolved) {
+              if (resolved && isUUID(resolved) && btnRef && btnRef.isConnected) {
+                btnRef.setAttribute("data-cw-instance-id", resolved);
+              }
+            });
+          })(existing, instanceCandidate);
         }
 
         if (!existingDivider) {
-          existingDivider = createActionDivider(bubbleButton);
+          existingDivider = createActionDivider(targetButton);
         }
 
         if (
           existing.parentElement !== parent ||
           existing.nextElementSibling !== existingDivider ||
-          existingDivider.nextElementSibling !== bubbleButton
+          existingDivider.nextElementSibling !== targetButton
         ) {
-          parent.insertBefore(existing, bubbleButton);
-          parent.insertBefore(existingDivider, bubbleButton);
+          parent.insertBefore(existing, targetButton);
+          parent.insertBefore(existingDivider, targetButton);
         }
         continue;
       }
 
-      var icon = createIconButton(instanceCandidate, bubbleButton);
+      var icon = createIconButton(instanceCandidate, targetButton);
       if (instanceCandidate && isUUID(instanceCandidate)) {
         icon.setAttribute("data-cw-instance-id", instanceCandidate);
       } else if (instanceCandidate) {
-        resolveInstanceIdSmart(instanceCandidate).then(function (resolved) {
-          if (resolved && isUUID(resolved) && icon && icon.setAttribute) {
-            icon.setAttribute("data-cw-instance-id", resolved);
-          }
-        });
+        (function (btnRef, candidateRef) {
+          resolveInstanceIdSmart(candidateRef).then(function (resolved) {
+            if (resolved && isUUID(resolved) && btnRef && btnRef.isConnected) {
+              btnRef.setAttribute("data-cw-instance-id", resolved);
+            }
+          });
+        })(icon, instanceCandidate);
       }
 
-      var divider = existingDivider || createActionDivider(bubbleButton);
-      parent.insertBefore(icon, bubbleButton);
-      parent.insertBefore(divider, bubbleButton);
+      var divider = existingDivider || createActionDivider(targetButton);
+      parent.insertBefore(icon, targetButton);
+      parent.insertBefore(divider, targetButton);
     }
   }
 
