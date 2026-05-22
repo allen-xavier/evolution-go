@@ -64,6 +64,14 @@ type chatwootConversationCreateResponse struct {
 	ID int `json:"id"`
 }
 
+type chatwootContactSearchResponse struct {
+	Payload []struct {
+		ID          int    `json:"id"`
+		PhoneNumber string `json:"phone_number"`
+		Identifier  string `json:"identifier"`
+	} `json:"payload"`
+}
+
 type chatwootHTTPError struct {
 	StatusCode int
 	Body       string
@@ -418,6 +426,15 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 
 	respBody, err := s.chatwootRequestJSON(http.MethodPost, cfg, fmt.Sprintf("/api/v1/accounts/%s/contacts", cfg.AccountID), body)
 	if err != nil {
+		var httpErr *chatwootHTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnprocessableEntity {
+			// Contact may already exist in the account (another inbox/instance).
+			// Reuse it to avoid stopping message sync.
+			existingID, lookupErr := s.findExistingContactID(cfg, identifier, phone)
+			if lookupErr == nil && existingID > 0 {
+				return existingID, nil
+			}
+		}
 		return 0, err
 	}
 
@@ -434,6 +451,61 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 	}
 
 	return 0, fmt.Errorf("chatwoot contact id not found in response")
+}
+
+func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConfig, identifier string, phone string) (int, error) {
+	identifier = strings.TrimSpace(identifier)
+	phone = strings.TrimSpace(phone)
+
+	queries := []string{
+		identifier,
+		phone,
+		strings.TrimPrefix(phone, "+"),
+	}
+
+	seen := make(map[int]struct{})
+	normalizedPhone := strings.TrimPrefix(phone, "+")
+
+	for _, q := range queries {
+		q = strings.TrimSpace(q)
+		if q == "" {
+			continue
+		}
+
+		route := fmt.Sprintf("/api/v1/accounts/%s/contacts/search?q=%s", cfg.AccountID, url.QueryEscape(q))
+		respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
+		if err != nil {
+			continue
+		}
+
+		var resp chatwootContactSearchResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			continue
+		}
+
+		for _, item := range resp.Payload {
+			if item.ID <= 0 {
+				continue
+			}
+
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+
+			itemIdentifier := strings.TrimSpace(item.Identifier)
+			itemPhone := strings.TrimPrefix(strings.TrimSpace(item.PhoneNumber), "+")
+
+			matchIdentifier := identifier != "" && strings.EqualFold(itemIdentifier, identifier)
+			matchPhone := normalizedPhone != "" && itemPhone != "" && strings.EqualFold(itemPhone, normalizedPhone)
+
+			if matchIdentifier || matchPhone {
+				return item.ID, nil
+			}
+		}
+	}
+
+	return 0, nil
 }
 
 func (s *chatwootService) createChatwootConversation(cfg *chatwoot_model.ChatwootConfig, contactID int, sourceID string) (int, error) {
