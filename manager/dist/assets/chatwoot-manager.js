@@ -95,8 +95,39 @@
       node = node.parentElement;
     }
 
+    var card = findInstanceCard(el);
+    var fromCard = readInstanceNameFromCard(card);
+    if (fromCard) return fromCard;
+
     var current = parseInstanceIdFromPath(window.location.pathname || "");
     return current || "";
+  }
+
+  function findInstanceCard(el) {
+    if (!el || !el.closest) return null;
+    return (
+      el.closest('[class*="group"][class*="relative"][class*="overflow-hidden"]') ||
+      el.closest('[class*="group"][class*="relative"]') ||
+      el.closest('[class*="overflow-hidden"]')
+    );
+  }
+
+  function readInstanceNameFromCard(card) {
+    if (!card || !card.querySelector) return "";
+
+    var subtitle = card.querySelector("h3 + p");
+    if (subtitle) {
+      var text = (subtitle.textContent || "").trim();
+      if (text) return text;
+    }
+
+    var heading = card.querySelector("h3");
+    if (heading) {
+      var fallback = (heading.textContent || "").trim();
+      if (fallback) return fallback;
+    }
+
+    return "";
   }
 
   function createModal() {
@@ -334,7 +365,7 @@
     var btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute(ACTION_ICON_ATTR, "1");
-    btn.setAttribute("data-cw-instance-id", instanceId);
+    if (instanceId) btn.setAttribute("data-cw-instance-id", instanceId);
     btn.setAttribute("title", "Chatwoot");
     btn.setAttribute("aria-label", "Chatwoot");
 
@@ -367,27 +398,45 @@
     btn.onclick = function (ev) {
       ev.preventDefault();
       ev.stopPropagation();
-      openModalForInstance(instanceId);
+      var dynamicInstanceId =
+        instanceId ||
+        resolveInstanceIdFromElement(btn) ||
+        readInstanceNameFromCard(findInstanceCard(btn)) ||
+        "";
+
+      if (!dynamicInstanceId) return;
+      btn.setAttribute("data-cw-instance-id", dynamicInstanceId);
+      openModalForInstance(dynamicInstanceId);
     };
 
     return btn;
   }
 
   function ensureIconLeftOfBlueBubble() {
-    var bubblePaths = document.querySelectorAll('svg path[d*="H7l-4 4V5a2 2"]');
+    var bubbleButtons = document.querySelectorAll(
+      'button[title="Enviar mensagem de texto"], button[title*="mensagem"], button[title*="Mensagem"]'
+    );
 
-    for (var i = 0; i < bubblePaths.length; i++) {
-      var path = bubblePaths[i];
-      var bubbleButton = path.closest("button, a");
+    if (!bubbleButtons.length) {
+      var bubblePaths = document.querySelectorAll('svg path[d*="H7l-4 4V5a2 2"]');
+      bubbleButtons = [];
+      for (var p = 0; p < bubblePaths.length; p++) {
+        var iconButton = bubblePaths[p].closest("button, a");
+        if (iconButton) bubbleButtons.push(iconButton);
+      }
+    }
+
+    for (var i = 0; i < bubbleButtons.length; i++) {
+      var bubbleButton = bubbleButtons[i];
       if (!bubbleButton) continue;
 
       var parent = bubbleButton.parentElement;
       if (!parent) continue;
 
       var instanceId = resolveInstanceIdFromElement(parent);
-      if (!instanceId) continue;
-
-      var existing = parent.querySelector("[" + ACTION_ICON_ATTR + '][data-cw-instance-id="' + instanceId + '"]');
+      var existing = instanceId
+        ? parent.querySelector("[" + ACTION_ICON_ATTR + '][data-cw-instance-id="' + instanceId + '"]')
+        : parent.querySelector("[" + ACTION_ICON_ATTR + "]");
       if (existing) {
         if (existing.nextSibling !== bubbleButton) {
           parent.insertBefore(existing, bubbleButton);
