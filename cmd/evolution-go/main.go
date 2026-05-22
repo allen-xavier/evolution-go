@@ -25,6 +25,10 @@ import (
 	call_service "github.com/EvolutionAPI/evolution-go/pkg/call/service"
 	chat_handler "github.com/EvolutionAPI/evolution-go/pkg/chat/handler"
 	chat_service "github.com/EvolutionAPI/evolution-go/pkg/chat/service"
+	chatwoot_handler "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/handler"
+	chatwoot_model "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/model"
+	chatwoot_repository "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/repository"
+	chatwoot_service "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/service"
 	community_handler "github.com/EvolutionAPI/evolution-go/pkg/community/handler"
 	community_service "github.com/EvolutionAPI/evolution-go/pkg/community/service"
 	config "github.com/EvolutionAPI/evolution-go/pkg/config"
@@ -160,6 +164,13 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	instanceRepository := instance_repository.NewInstanceRepository(db)
 	messageRepository := message_repository.NewMessageRepository(db)
 	labelRepository := label_repository.NewLabelRepository(db)
+	chatwootRepository := chatwoot_repository.NewChatwootRepository(db)
+	chatwootService := chatwoot_service.NewChatwootService(
+		chatwootRepository,
+		instanceRepository,
+		clientPointer,
+		loggerWrapper,
+	)
 
 	whatsmeowService := whatsmeow_service.NewWhatsmeowService(
 		instanceRepository,
@@ -177,6 +188,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		mediaStorage,
 		natsProducer,
 		loggerWrapper,
+		chatwootService,
 	)
 	instanceService := instance_service.NewInstanceService(
 		instanceRepository,
@@ -234,6 +246,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		newsletter_handler.NewNewsletterHandler(newsletterService),
 		pollHandler,
 		server_handler.NewServerHandler(),
+		chatwoot_handler.NewChatwootHandler(chatwootService),
 	).AssignRoutes(r)
 
 	if config.ConnectOnStartup {
@@ -257,7 +270,13 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 }
 
 func migrate(db *gorm.DB) {
-	err := db.AutoMigrate(&instance_model.Instance{}, &message_model.Message{}, &label_model.Label{})
+	err := db.AutoMigrate(
+		&instance_model.Instance{},
+		&message_model.Message{},
+		&label_model.Label{},
+		&chatwoot_model.ChatwootConfig{},
+		&chatwoot_model.ChatwootBinding{},
+	)
 
 	if err != nil {
 		log.Fatal(err)
