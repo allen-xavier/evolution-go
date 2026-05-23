@@ -472,15 +472,16 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConfig, identifier string, phone string) (int, error) {
 	identifier = strings.TrimSpace(identifier)
 	phone = strings.TrimSpace(phone)
+	normalizedPhone := normalizePhoneForCompare(phone)
 
 	queries := []string{
 		identifier,
 		phone,
 		strings.TrimPrefix(phone, "+"),
+		normalizedPhone,
 	}
 
 	seen := make(map[int]struct{})
-	normalizedPhone := strings.TrimPrefix(phone, "+")
 
 	for _, q := range queries {
 		q = strings.TrimSpace(q)
@@ -488,7 +489,7 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 			continue
 		}
 
-		route := fmt.Sprintf("/api/v1/accounts/%s/contacts/search?q=%s", cfg.AccountID, url.QueryEscape(q))
+		route := fmt.Sprintf("/api/v1/accounts/%s/contacts/search?q=%s", cfg.AccountID, url.Values{"q": []string{q}}.Encode())
 		respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
 		if err != nil {
 			continue
@@ -510,10 +511,13 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 			seen[item.ID] = struct{}{}
 
 			itemIdentifier := strings.TrimSpace(item.Identifier)
-			itemPhone := strings.TrimPrefix(strings.TrimSpace(item.PhoneNumber), "+")
+			itemPhone := normalizePhoneForCompare(item.PhoneNumber)
 
 			matchIdentifier := identifier != "" && strings.EqualFold(itemIdentifier, identifier)
-			matchPhone := normalizedPhone != "" && itemPhone != "" && strings.EqualFold(itemPhone, normalizedPhone)
+			matchPhone := normalizedPhone != "" && itemPhone != "" &&
+				(strings.EqualFold(itemPhone, normalizedPhone) ||
+					strings.HasSuffix(itemPhone, normalizedPhone) ||
+					strings.HasSuffix(normalizedPhone, itemPhone))
 
 			if matchIdentifier || matchPhone {
 				return item.ID, nil
@@ -1166,8 +1170,37 @@ func joinChatwootURL(base string, route string) (string, error) {
 	if u.Scheme == "" || u.Host == "" {
 		return "", fmt.Errorf("invalid chatwoot url")
 	}
-	u.Path = path.Join(u.Path, route)
+
+	routeURL, err := url.Parse(strings.TrimSpace(route))
+	if err != nil {
+		return "", err
+	}
+
+	u.Path = path.Join(u.Path, routeURL.Path)
+	baseQuery := u.Query()
+	for key, values := range routeURL.Query() {
+		baseQuery.Del(key)
+		for _, v := range values {
+			baseQuery.Add(key, v)
+		}
+	}
+	u.RawQuery = baseQuery.Encode()
+
 	return u.String(), nil
+}
+
+func normalizePhoneForCompare(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func normalizeChatwootFileType(fileType string, mimeType string) string {
