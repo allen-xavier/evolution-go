@@ -46,6 +46,7 @@ type chatwootService struct {
 	clientPointer      map[string]*whatsmeow.Client
 	httpClient         *http.Client
 	skipCache          *cache.Cache
+	lidCache           *cache.Cache
 	loggerWrapper      *logger_wrapper.LoggerManager
 }
 
@@ -294,9 +295,10 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	if !ok {
 		return fmt.Errorf("invalid remote jid: %s", remoteJID)
 	}
+	s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Chatwoot webhook resolved recipient: remote=%s parsed=%s", instanceID, remoteJID, recipient.String())
 
 	if strings.TrimSpace(payload.Content) != "" {
-		if err := s.sendTextFromChatwoot(instance, client, recipient, payload.Content, chatwootMessageID); err != nil {
+		if err := s.sendTextFromChatwoot(instance, client, recipient, remoteJID, payload.Content, chatwootMessageID); err != nil {
 			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send text from Chatwoot to WhatsApp: %v", instanceID, err)
 		}
 	}
@@ -305,7 +307,7 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		if a.DataURL == "" {
 			continue
 		}
-		if err := s.sendMediaFromChatwoot(instance, client, recipient, a.DataURL, a.FileType, chatwootMessageID); err != nil {
+		if err := s.sendMediaFromChatwoot(instance, client, recipient, remoteJID, a.DataURL, a.FileType, chatwootMessageID); err != nil {
 			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send media from Chatwoot to WhatsApp: %v", instanceID, err)
 		}
 	}
@@ -343,6 +345,7 @@ func (s *chatwootService) SyncWhatsAppMessage(instance *instance_model.Instance,
 	if shouldIgnoreJID(cfg.IgnoreJids, chatJID) {
 		return
 	}
+	s.cacheLIDMappingFromMessage(instance.Id, evt)
 
 	content, mediaType := extractMessageContent(evt.Message)
 	messageType := "incoming"
@@ -725,6 +728,7 @@ func (s *chatwootService) sendTextFromChatwoot(
 	instance *instance_model.Instance,
 	client *whatsmeow.Client,
 	recipient types.JID,
+	remoteJID string,
 	content string,
 	chatwootMessageID string,
 ) error {
@@ -732,7 +736,7 @@ func (s *chatwootService) sendTextFromChatwoot(
 		Conversation: proto.String(content),
 	}
 
-	if err := s.sendWhatsAppMessageWithRetry(instance.Id, client, recipient, msg); err != nil {
+	if err := s.sendToWhatsAppWithRecipientFallback(instance.Id, client, recipient, remoteJID, msg); err != nil {
 		return err
 	}
 
@@ -744,6 +748,7 @@ func (s *chatwootService) sendMediaFromChatwoot(
 	instance *instance_model.Instance,
 	client *whatsmeow.Client,
 	recipient types.JID,
+	remoteJID string,
 	dataURL string,
 	fileType string,
 	chatwootMessageID string,
@@ -820,12 +825,82 @@ func (s *chatwootService) sendMediaFromChatwoot(
 		}}
 	}
 
-	if err := s.sendWhatsAppMessageWithRetry(instance.Id, client, recipient, msg); err != nil {
+	if err := s.sendToWhatsAppWithRecipientFallback(instance.Id, client, recipient, remoteJID, msg); err != nil {
 		return err
 	}
 
 	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Chatwoot message %s sent to WhatsApp as media (%s)", instance.Id, chatwootMessageID, mediaKind)
 	return nil
+}
+
+func (s *chatwootService) sendToWhatsAppWithRecipientFallback(
+	instanceID string,
+	client *whatsmeow.Client,
+	recipient types.JID,
+	remoteJID string,
+	msg *waE2E.Message,
+) error {
+	err := s.sendWhatsAppMessageWithRetry(instanceID, client, recipient, msg)
+	if err == nil {
+		return nil
+	}
+	if !shouldTryAlternateRecipient(err) {
+		return err
+	}
+
+	alt, reason, ok := s.resolveAlternateRecipient(instanceID, client, recipient, remoteJID)
+	if !ok || alt.IsEmpty() || strings.EqualFold(alt.String(), recipient.String()) {
+		return err
+	}
+
+	s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Retrying Chatwoot->WhatsApp with alternate recipient (%s): %s -> %s", instanceID, reason, recipient.String(), alt.String())
+	altErr := s.sendWhatsAppMessageWithRetry(instanceID, client, alt, msg)
+	if altErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%v (alternate recipient %s failed: %v)", err, alt.String(), altErr)
+}
+
+func (s *chatwootService) resolveAlternateRecipient(
+	instanceID string,
+	client *whatsmeow.Client,
+	recipient types.JID,
+	remoteJID string,
+) (types.JID, string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	if recipient.Server == types.DefaultUserServer {
+		if lid, ok := s.getCachedLIDForPN(instanceID, remoteJID); ok {
+			if parsed, err := types.ParseJID(lid); err == nil && !parsed.IsEmpty() {
+				return parsed, "instance_lid_cache", true
+			}
+		}
+
+		if client.Store != nil && client.Store.LIDs != nil {
+			if lid, err := client.Store.LIDs.GetLIDForPN(ctx, recipient); err == nil && !lid.IsEmpty() {
+				return lid, "store_lid_map", true
+			}
+		}
+
+		// Force an up-to-date user info query to refresh LID mappings.
+		if _, err := client.GetUserInfo(ctx, []types.JID{recipient}); err == nil {
+			if client.Store != nil && client.Store.LIDs != nil {
+				if lid, err := client.Store.LIDs.GetLIDForPN(ctx, recipient); err == nil && !lid.IsEmpty() {
+					return lid, "usync_lid_map", true
+				}
+			}
+		}
+		return types.JID{}, "", false
+	}
+
+	if recipient.Server == types.HiddenUserServer && client.Store != nil && client.Store.LIDs != nil {
+		if pn, err := client.Store.LIDs.GetPNForLID(ctx, recipient); err == nil && !pn.IsEmpty() {
+			return pn, "store_pn_map", true
+		}
+	}
+
+	return types.JID{}, "", false
 }
 
 func (s *chatwootService) sendWhatsAppMessageWithRetry(
@@ -1293,6 +1368,51 @@ func uniqueNonEmptyStrings(values []string) []string {
 	return result
 }
 
+func (s *chatwootService) cacheLIDMappingFromMessage(instanceID string, evt *events.Message) {
+	if s == nil || s.lidCache == nil || evt == nil {
+		return
+	}
+	chatJID := normalizeRemoteJID(evt.Info.Chat.String())
+	senderAlt := normalizeRemoteJID(evt.Info.SenderAlt.String())
+	if chatJID == "" || senderAlt == "" {
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(chatJID), "@s.whatsapp.net") {
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(senderAlt), "@lid") {
+		return
+	}
+	s.lidCache.Set(fmt.Sprintf("%s:%s", instanceID, chatJID), senderAlt, 24*time.Hour)
+}
+
+func (s *chatwootService) getCachedLIDForPN(instanceID string, pn string) (string, bool) {
+	if s == nil || s.lidCache == nil {
+		return "", false
+	}
+	pn = normalizeRemoteJID(pn)
+	if pn != "" && !strings.Contains(pn, "@") {
+		normalizedUser := strings.TrimPrefix(strings.TrimSpace(pn), "+")
+		if normalizedUser != "" {
+			pn = normalizedUser + "@" + types.DefaultUserServer
+		}
+	}
+	if pn == "" {
+		return "", false
+	}
+	key := fmt.Sprintf("%s:%s", instanceID, pn)
+	value, ok := s.lidCache.Get(key)
+	if !ok {
+		return "", false
+	}
+	lid, _ := value.(string)
+	lid = normalizeRemoteJID(lid)
+	if lid == "" {
+		return "", false
+	}
+	return lid, true
+}
+
 func normalizeChatwootFileType(fileType string, mimeType string) string {
 	ft := strings.ToLower(strings.TrimSpace(fileType))
 	switch ft {
@@ -1333,6 +1453,26 @@ func shouldRetryWhatsmeowSend(err error) bool {
 		return true
 	}
 	if strings.Contains(msg, "failed to get device list") {
+		return true
+	}
+	return false
+}
+
+func shouldTryAlternateRecipient(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "server returned error 463") {
+		return true
+	}
+	if strings.Contains(msg, "server returned error 479") {
+		return true
+	}
+	if strings.Contains(msg, "no lid found") {
+		return true
+	}
+	if strings.Contains(msg, "failed to get lid for pn") {
 		return true
 	}
 	return false
@@ -1406,6 +1546,7 @@ func NewChatwootService(
 			Timeout: 60 * time.Second,
 		},
 		skipCache:     cache.New(10*time.Minute, 20*time.Minute),
+		lidCache:      cache.New(24*time.Hour, 30*time.Minute),
 		loggerWrapper: loggerWrapper,
 	}
 }
