@@ -35,7 +35,6 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/EvolutionAPI/evolution-go/pkg/config"
-	chatwoot_service "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/service"
 	producer_interfaces "github.com/EvolutionAPI/evolution-go/pkg/events/interfaces"
 	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
 	instance_repository "github.com/EvolutionAPI/evolution-go/pkg/instance/repository"
@@ -90,7 +89,6 @@ type whatsmeowService struct {
 	processedMessages  *cache.Cache
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
-	chatwootService    chatwoot_service.ChatwootService
 }
 
 type MyClient struct {
@@ -122,7 +120,6 @@ type MyClient struct {
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
 	qrcodeCount        int
-	chatwootService    chatwoot_service.ChatwootService
 }
 
 type ClientData struct {
@@ -474,7 +471,6 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		natsProducer:       w.natsProducer,
 		loggerWrapper:      w.loggerWrapper,
 		qrcodeCount:        0,
-		chatwootService:    w.chatwootService,
 	}
 
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
@@ -1139,10 +1135,6 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		if parsedMessageType == "ignore" || strings.HasPrefix(parsedMessageType, "unknown_protocol_") {
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Message ignored because it's a unknown protocol message", mycli.userID)
 			return
-		}
-
-		if mycli.chatwootService != nil {
-			go mycli.chatwootService.SyncWhatsAppMessage(mycli.Instance, evt, mycli.WAClient)
 		}
 
 		if postMap["data"] != nil {
@@ -2670,7 +2662,6 @@ func NewWhatsmeowService(
 	mediaStorage storage_interfaces.MediaStorage,
 	natsProducer producer_interfaces.Producer,
 	loggerWrapper *logger_wrapper.LoggerManager,
-	chatwootService chatwoot_service.ChatwootService,
 ) WhatsmeowService {
 	// Inicializar PollService de forma segura
 	pollSvc := poll_service.NewPollService(authDB, loggerWrapper)
@@ -2695,7 +2686,6 @@ func NewWhatsmeowService(
 		processedMessages:  cache.New(30*time.Minute, 1*time.Hour),
 		natsProducer:       natsProducer,
 		loggerWrapper:      loggerWrapper,
-		chatwootService:    chatwootService,
 	}
 }
 
