@@ -27,6 +27,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -47,6 +48,7 @@ type chatwootService struct {
 	httpClient         *http.Client
 	skipCache          *cache.Cache
 	lidCache           *cache.Cache
+	webhookCache       *cache.Cache
 	loggerWrapper      *logger_wrapper.LoggerManager
 }
 
@@ -67,9 +69,9 @@ type chatwootConversationCreateResponse struct {
 
 type chatwootContactSearchResponse struct {
 	Payload []struct {
-		ID          int    `json:"id"`
-		PhoneNumber string `json:"phone_number"`
-		Identifier  string `json:"identifier"`
+		ID             int    `json:"id"`
+		PhoneNumber    string `json:"phone_number"`
+		Identifier     string `json:"identifier"`
 		ContactInboxes []struct {
 			SourceID string `json:"source_id"`
 			Inbox    struct {
@@ -97,11 +99,11 @@ func (e *chatwootHTTPError) Error() string {
 }
 
 type chatwootWebhookPayload struct {
-	Event       string `json:"event"`
-	ID          interface{} `json:"id"`
-	Content     string `json:"content"`
-	MessageType string `json:"message_type"`
-	Private     bool   `json:"private"`
+	Event        string      `json:"event"`
+	ID           interface{} `json:"id"`
+	Content      string      `json:"content"`
+	MessageType  string      `json:"message_type"`
+	Private      bool        `json:"private"`
 	Conversation struct {
 		ID           int `json:"id"`
 		InboxID      int `json:"inbox_id"`
@@ -265,6 +267,11 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		return nil
 	}
 	chatwootMessageID := webhookMessageID(payload.ID)
+	webhookKey := fmt.Sprintf("%s:%s", instanceID, chatwootMessageID)
+	if _, exists := s.webhookCache.Get(webhookKey); exists {
+		s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Skipping duplicated Chatwoot webhook message: %s", instanceID, chatwootMessageID)
+		return nil
+	}
 
 	instance, err := s.instanceRepository.GetInstanceByID(instanceID)
 	if err != nil {
@@ -297,9 +304,12 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	}
 	s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Chatwoot webhook resolved recipient: remote=%s parsed=%s", instanceID, remoteJID, recipient.String())
 
+	var sendErrors []string
+
 	if strings.TrimSpace(payload.Content) != "" {
 		if err := s.sendTextFromChatwoot(instance, client, recipient, remoteJID, payload.Content, chatwootMessageID); err != nil {
 			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send text from Chatwoot to WhatsApp: %v", instanceID, err)
+			sendErrors = append(sendErrors, fmt.Sprintf("text:%v", err))
 		}
 	}
 
@@ -309,9 +319,15 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		}
 		if err := s.sendMediaFromChatwoot(instance, client, recipient, remoteJID, a.DataURL, a.FileType, chatwootMessageID); err != nil {
 			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send media from Chatwoot to WhatsApp: %v", instanceID, err)
+			sendErrors = append(sendErrors, fmt.Sprintf("media:%v", err))
 		}
 	}
 
+	if len(sendErrors) > 0 {
+		return fmt.Errorf("failed to deliver chatwoot message %s: %s", chatwootMessageID, strings.Join(sendErrors, " | "))
+	}
+
+	s.webhookCache.Set(webhookKey, true, 24*time.Hour)
 	return nil
 }
 
@@ -732,11 +748,28 @@ func (s *chatwootService) sendTextFromChatwoot(
 	content string,
 	chatwootMessageID string,
 ) error {
-	msg := &waE2E.Message{
-		Conversation: proto.String(content),
+	text := strings.TrimSpace(content)
+	if text == "" {
+		text = content
 	}
 
-	if err := s.sendToWhatsAppWithRecipientFallback(instance.Id, client, recipient, remoteJID, msg); err != nil {
+	primaryMsg := &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+		},
+	}
+
+	if err := s.sendToWhatsAppWithRecipientFallback(instance.Id, client, recipient, remoteJID, primaryMsg); err != nil {
+		if shouldTryLegacyTextFormat(err) {
+			legacyMsg := &waE2E.Message{
+				Conversation: proto.String(text),
+			}
+			legacyErr := s.sendToWhatsAppWithRecipientFallback(instance.Id, client, recipient, remoteJID, legacyMsg)
+			if legacyErr == nil {
+				return nil
+			}
+			return fmt.Errorf("%v (conversation fallback failed: %v)", err, legacyErr)
+		}
 		return err
 	}
 
@@ -844,6 +877,16 @@ func (s *chatwootService) sendToWhatsAppWithRecipientFallback(
 	if err == nil {
 		return nil
 	}
+
+	if shouldRetryAfterRecipientWarmup(err) {
+		s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Chatwoot->WhatsApp send failed, trying recipient warmup before fallback: %v", instanceID, err)
+		retryErr := s.retryAfterRecipientWarmup(instanceID, client, recipient, msg)
+		if retryErr == nil {
+			return nil
+		}
+		err = fmt.Errorf("%v (warmup retry failed: %v)", err, retryErr)
+	}
+
 	if !shouldTryAlternateRecipient(err) {
 		return err
 	}
@@ -855,10 +898,140 @@ func (s *chatwootService) sendToWhatsAppWithRecipientFallback(
 
 	s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Retrying Chatwoot->WhatsApp with alternate recipient (%s): %s -> %s", instanceID, reason, recipient.String(), alt.String())
 	altErr := s.sendWhatsAppMessageWithRetry(instanceID, client, alt, msg)
+	if altErr != nil && shouldRetryAfterRecipientWarmup(altErr) {
+		s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Alternate recipient send failed, trying warmup: %v", instanceID, altErr)
+		retryAltErr := s.retryAfterRecipientWarmup(instanceID, client, alt, msg)
+		if retryAltErr == nil {
+			return nil
+		}
+		altErr = fmt.Errorf("%v (warmup retry failed: %v)", altErr, retryAltErr)
+	}
 	if altErr == nil {
 		return nil
 	}
 	return fmt.Errorf("%v (alternate recipient %s failed: %v)", err, alt.String(), altErr)
+}
+
+func (s *chatwootService) retryAfterRecipientWarmup(
+	instanceID string,
+	client *whatsmeow.Client,
+	recipient types.JID,
+	msg *waE2E.Message,
+) error {
+	if err := s.warmupRecipientPrivacyToken(instanceID, client, recipient); err != nil {
+		s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Recipient warmup finished with warning for %s: %v", instanceID, recipient.String(), err)
+	}
+	return s.sendWhatsAppMessageWithRetry(instanceID, client, recipient, msg)
+}
+
+func (s *chatwootService) warmupRecipientPrivacyToken(
+	instanceID string,
+	client *whatsmeow.Client,
+	recipient types.JID,
+) error {
+	if client == nil {
+		return fmt.Errorf("nil whatsapp client")
+	}
+	if recipient.IsEmpty() {
+		return fmt.Errorf("empty recipient")
+	}
+	if recipient.Server != types.DefaultUserServer && recipient.Server != types.HiddenUserServer {
+		return nil
+	}
+	if client.Store == nil || client.Store.PrivacyTokens == nil {
+		return fmt.Errorf("privacy token store not initialized")
+	}
+
+	candidates := []types.JID{recipient.ToNonAD()}
+	if client.Store.LIDs != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+
+		if recipient.Server == types.DefaultUserServer {
+			if lid, err := client.Store.LIDs.GetLIDForPN(ctx, recipient.ToNonAD()); err == nil && !lid.IsEmpty() {
+				candidates = append(candidates, lid.ToNonAD())
+			}
+		} else if recipient.Server == types.HiddenUserServer {
+			if pn, err := client.Store.LIDs.GetPNForLID(ctx, recipient.ToNonAD()); err == nil && !pn.IsEmpty() {
+				candidates = append(candidates, pn.ToNonAD())
+			}
+		}
+	}
+	candidates = uniqueJIDs(candidates)
+
+	getToken := func(ctx context.Context, jid types.JID) (*store.PrivacyToken, error) {
+		if jid.IsEmpty() {
+			return nil, nil
+		}
+		token, err := client.Store.PrivacyTokens.GetPrivacyToken(ctx, jid.ToNonAD())
+		if err != nil || token != nil {
+			return token, err
+		}
+		if client.Store.LIDs == nil {
+			return nil, nil
+		}
+		if jid.Server == types.DefaultUserServer {
+			lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, jid.ToNonAD())
+			if lidErr != nil || lid.IsEmpty() {
+				return nil, nil
+			}
+			return client.Store.PrivacyTokens.GetPrivacyToken(ctx, lid.ToNonAD())
+		}
+		if jid.Server == types.HiddenUserServer {
+			pn, pnErr := client.Store.LIDs.GetPNForLID(ctx, jid.ToNonAD())
+			if pnErr != nil || pn.IsEmpty() {
+				return nil, nil
+			}
+			return client.Store.PrivacyTokens.GetPrivacyToken(ctx, pn.ToNonAD())
+		}
+		return nil, nil
+	}
+
+	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer tokenCancel()
+	for _, candidate := range candidates {
+		if token, err := getToken(tokenCtx, candidate); err == nil && token != nil {
+			s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Recipient warmup skipped: privacy token already present for %s", instanceID, candidate.String())
+			return nil
+		}
+	}
+
+	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer refreshCancel()
+	for _, candidate := range candidates {
+		if candidate.IsEmpty() {
+			continue
+		}
+		if candidate.Server == types.DefaultUserServer {
+			if _, err := client.GetUserInfo(refreshCtx, []types.JID{candidate}); err != nil {
+				s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Recipient warmup GetUserInfo failed for %s: %v", instanceID, candidate.String(), err)
+			}
+		}
+		if err := client.SubscribePresence(refreshCtx, candidate); err != nil {
+			s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Recipient warmup SubscribePresence failed for %s: %v", instanceID, candidate.String(), err)
+		}
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		found := false
+		for _, candidate := range candidates {
+			token, err := getToken(checkCtx, candidate)
+			if err == nil && token != nil {
+				found = true
+				break
+			}
+		}
+		checkCancel()
+		if found {
+			s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Recipient warmup loaded privacy token for %s", instanceID, recipient.String())
+			return nil
+		}
+		time.Sleep(350 * time.Millisecond)
+	}
+
+	return fmt.Errorf("privacy token still unavailable for %s after warmup", recipient.String())
 }
 
 func (s *chatwootService) resolveAlternateRecipient(
@@ -871,6 +1044,10 @@ func (s *chatwootService) resolveAlternateRecipient(
 	defer cancel()
 
 	if recipient.Server == types.DefaultUserServer {
+		if canonical, ok := resolveCanonicalPNRecipient(ctx, client, recipient); ok && !canonical.IsEmpty() && !strings.EqualFold(canonical.String(), recipient.String()) {
+			return canonical, "is_on_whatsapp", true
+		}
+
 		if lid, ok := s.getCachedLIDForPN(instanceID, remoteJID); ok {
 			if parsed, err := types.ParseJID(lid); err == nil && !parsed.IsEmpty() {
 				return parsed, "instance_lid_cache", true
@@ -910,9 +1087,9 @@ func (s *chatwootService) sendWhatsAppMessageWithRetry(
 	msg *waE2E.Message,
 ) error {
 	const (
-		maxAttempts = 2
+		maxAttempts   = 2
 		timeoutPerTry = 30 * time.Second
-		retryDelay = 2 * time.Second
+		retryDelay    = 2 * time.Second
 	)
 
 	var lastErr error
@@ -1368,6 +1545,24 @@ func uniqueNonEmptyStrings(values []string) []string {
 	return result
 }
 
+func uniqueJIDs(values []types.JID) []types.JID {
+	seen := map[string]struct{}{}
+	result := make([]types.JID, 0, len(values))
+	for _, v := range values {
+		v = v.ToNonAD()
+		if v.IsEmpty() {
+			continue
+		}
+		key := v.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, v)
+	}
+	return result
+}
+
 func (s *chatwootService) cacheLIDMappingFromMessage(instanceID string, evt *events.Message) {
 	if s == nil || s.lidCache == nil || evt == nil {
 		return
@@ -1411,6 +1606,22 @@ func (s *chatwootService) getCachedLIDForPN(instanceID string, pn string) (strin
 		return "", false
 	}
 	return lid, true
+}
+
+func resolveCanonicalPNRecipient(ctx context.Context, client *whatsmeow.Client, recipient types.JID) (types.JID, bool) {
+	if client == nil || recipient.IsEmpty() || recipient.Server != types.DefaultUserServer {
+		return types.JID{}, false
+	}
+	phone := "+" + strings.TrimSpace(recipient.User)
+	resp, err := client.IsOnWhatsApp(ctx, []string{phone})
+	if err != nil || len(resp) == 0 || !resp[0].IsIn {
+		return types.JID{}, false
+	}
+	jid := resp[0].JID
+	if jid.IsEmpty() {
+		return types.JID{}, false
+	}
+	return jid.ToNonAD(), true
 }
 
 func normalizeChatwootFileType(fileType string, mimeType string) string {
@@ -1473,6 +1684,34 @@ func shouldTryAlternateRecipient(err error) bool {
 		return true
 	}
 	if strings.Contains(msg, "failed to get lid for pn") {
+		return true
+	}
+	return false
+}
+
+func shouldRetryAfterRecipientWarmup(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "server returned error 463") {
+		return true
+	}
+	if strings.Contains(msg, "no privacy token") {
+		return true
+	}
+	return false
+}
+
+func shouldTryLegacyTextFormat(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "server returned error") {
+		return true
+	}
+	if strings.Contains(msg, "not-acceptable") || strings.Contains(msg, "not-allowed") {
 		return true
 	}
 	return false
@@ -1547,6 +1786,7 @@ func NewChatwootService(
 		},
 		skipCache:     cache.New(10*time.Minute, 20*time.Minute),
 		lidCache:      cache.New(24*time.Hour, 30*time.Minute),
+		webhookCache:  cache.New(24*time.Hour, 1*time.Hour),
 		loggerWrapper: loggerWrapper,
 	}
 }
