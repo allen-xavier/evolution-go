@@ -36,6 +36,7 @@ import (
 
 	"github.com/EvolutionAPI/evolution-go/pkg/config"
 	producer_interfaces "github.com/EvolutionAPI/evolution-go/pkg/events/interfaces"
+	event_observer "github.com/EvolutionAPI/evolution-go/pkg/events/observer"
 	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
 	instance_repository "github.com/EvolutionAPI/evolution-go/pkg/instance/repository"
 	"github.com/EvolutionAPI/evolution-go/pkg/internal/event_types"
@@ -1987,6 +1988,8 @@ func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueN
 	if !ok {
 		return
 	}
+
+	event_observer.Dispatch(instance, eventType, queueName, jsonData)
 
 	eventArray := strings.Split(instance.Events, ",")
 
