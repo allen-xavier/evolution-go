@@ -655,11 +655,7 @@ func (s *chatwootService) sendTextFromChatwoot(
 		Conversation: proto.String(content),
 	}
 
-	messageID := client.GenerateMessageID()
-	s.skipCache.Set(fmt.Sprintf("%s:%s", instance.Id, messageID), true, 5*time.Minute)
-
-	_, err := client.SendMessage(context.Background(), recipient, msg, whatsmeow.SendRequestExtra{ID: messageID})
-	if err != nil {
+	if err := s.sendWhatsAppMessageWithRetry(instance.Id, client, recipient, msg); err != nil {
 		return err
 	}
 
@@ -747,16 +743,48 @@ func (s *chatwootService) sendMediaFromChatwoot(
 		}}
 	}
 
-	messageID := client.GenerateMessageID()
-	s.skipCache.Set(fmt.Sprintf("%s:%s", instance.Id, messageID), true, 5*time.Minute)
-
-	_, err = client.SendMessage(context.Background(), recipient, msg, whatsmeow.SendRequestExtra{ID: messageID})
-	if err != nil {
+	if err := s.sendWhatsAppMessageWithRetry(instance.Id, client, recipient, msg); err != nil {
 		return err
 	}
 
 	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Chatwoot message %s sent to WhatsApp as media (%s)", instance.Id, chatwootMessageID, mediaKind)
 	return nil
+}
+
+func (s *chatwootService) sendWhatsAppMessageWithRetry(
+	instanceID string,
+	client *whatsmeow.Client,
+	recipient types.JID,
+	msg *waE2E.Message,
+) error {
+	const (
+		maxAttempts = 2
+		timeoutPerTry = 30 * time.Second
+		retryDelay = 2 * time.Second
+	)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		messageID := client.GenerateMessageID()
+		s.skipCache.Set(fmt.Sprintf("%s:%s", instanceID, messageID), true, 5*time.Minute)
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeoutPerTry)
+		_, err := client.SendMessage(ctx, recipient, msg, whatsmeow.SendRequestExtra{ID: messageID})
+		cancel()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if attempt >= maxAttempts || !shouldRetryWhatsmeowSend(err) {
+			break
+		}
+
+		s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Chatwoot->WhatsApp send attempt %d failed, retrying: %v", instanceID, attempt, err)
+		time.Sleep(retryDelay)
+	}
+
+	return lastErr
 }
 
 func (s *chatwootService) downloadAttachmentData(raw string) ([]byte, string, error) {
@@ -1168,6 +1196,23 @@ func normalizeMimeType(mime string, fallback string) string {
 		return fallback
 	}
 	return m
+}
+
+func shouldRetryWhatsmeowSend(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timed out") || strings.Contains(msg, "timeout") {
+		return true
+	}
+	if strings.Contains(msg, "usync") {
+		return true
+	}
+	if strings.Contains(msg, "failed to get device list") {
+		return true
+	}
+	return false
 }
 
 func verifyWebhookSignature(secret string, headers http.Header, body []byte) error {

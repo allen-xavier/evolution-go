@@ -281,6 +281,44 @@ func migrate(db *gorm.DB) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if err := ensureChatwootBindingsCompatibility(db); err != nil {
+		logger.LogWarn("chatwoot bindings compatibility migration failed: %v", err)
+	}
+}
+
+func ensureChatwootBindingsCompatibility(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&chatwoot_model.ChatwootBinding{}) {
+		return nil
+	}
+
+	// Target schema for current versions.
+	if !db.Migrator().HasColumn("chatwoot_bindings", "remote_jid") {
+		if err := db.Exec("ALTER TABLE chatwoot_bindings ADD COLUMN IF NOT EXISTS remote_jid VARCHAR(191)").Error; err != nil {
+			return err
+		}
+	}
+
+	legacyColumns := []string{"remote_j_id", "remotejid"}
+	for _, legacy := range legacyColumns {
+		if !db.Migrator().HasColumn("chatwoot_bindings", legacy) {
+			continue
+		}
+		query := fmt.Sprintf(
+			"UPDATE chatwoot_bindings SET remote_jid = %s WHERE (remote_jid IS NULL OR remote_jid = '') AND %s IS NOT NULL AND %s <> ''",
+			legacy, legacy, legacy,
+		)
+		if err := db.Exec(query).Error; err != nil {
+			return err
+		}
+		break
+	}
+
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_chatwoot_bindings_instance_remote_jid ON chatwoot_bindings (instance_id, remote_jid)").Error; err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func initAuthDB(config *config.Config) (*sql.DB, string, error) {
