@@ -69,6 +69,12 @@ type chatwootContactSearchResponse struct {
 		ID          int    `json:"id"`
 		PhoneNumber string `json:"phone_number"`
 		Identifier  string `json:"identifier"`
+		ContactInboxes []struct {
+			SourceID string `json:"source_id"`
+			Inbox    struct {
+				ID int `json:"id"`
+			} `json:"inbox"`
+		} `json:"contact_inboxes"`
 	} `json:"payload"`
 }
 
@@ -450,6 +456,9 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 			if lookupErr == nil && existingID > 0 {
 				return existingID, nil
 			}
+			if lookupErr != nil {
+				return 0, fmt.Errorf("%v (lookup existing contact failed: %v)", err, lookupErr)
+			}
 		}
 		return 0, err
 	}
@@ -474,21 +483,17 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 	phone = strings.TrimSpace(phone)
 	normalizedPhone := normalizePhoneForCompare(phone)
 
-	queries := []string{
+	queries := uniqueNonEmptyStrings([]string{
 		identifier,
 		phone,
 		strings.TrimPrefix(phone, "+"),
 		normalizedPhone,
-	}
+	})
 
 	seen := make(map[int]struct{})
+	candidates := make([]chatwootContactSearchResponse, 0, len(queries))
 
 	for _, q := range queries {
-		q = strings.TrimSpace(q)
-		if q == "" {
-			continue
-		}
-
 		route := fmt.Sprintf("/api/v1/accounts/%s/contacts/search?q=%s", cfg.AccountID, url.Values{"q": []string{q}}.Encode())
 		respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
 		if err != nil {
@@ -499,7 +504,68 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 		if err := json.Unmarshal(respBody, &resp); err != nil {
 			continue
 		}
+		candidates = append(candidates, resp)
+	}
 
+	// Fallback for Chatwoot versions where /contacts/search is limited:
+	// use /contacts/filter with exact identifier and phone matching.
+	type filterReq struct {
+		Attribute string
+		Value     string
+	}
+	filterRequests := make([]filterReq, 0, 6)
+	if identifier != "" {
+		filterRequests = append(filterRequests, filterReq{Attribute: "identifier", Value: identifier})
+	}
+	for _, phoneValue := range uniqueNonEmptyStrings([]string{phone, strings.TrimPrefix(phone, "+"), normalizedPhone}) {
+		filterRequests = append(filterRequests, filterReq{Attribute: "phone_number", Value: phoneValue})
+	}
+
+	for _, fr := range filterRequests {
+		filterBody := map[string]interface{}{
+			"payload": []map[string]interface{}{
+				{
+					"attribute_key":   fr.Attribute,
+					"filter_operator": "equal_to",
+					"values":          []string{fr.Value},
+					"query_operator":  nil,
+				},
+			},
+		}
+		route := fmt.Sprintf("/api/v1/accounts/%s/contacts/filter", cfg.AccountID)
+		respBody, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, filterBody)
+		if err != nil {
+			continue
+		}
+
+		var resp chatwootContactSearchResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			continue
+		}
+		candidates = append(candidates, resp)
+	}
+
+	// Last resort: scan the contacts list pages to find an exact match.
+	for page := 1; page <= 10; page++ {
+		route := fmt.Sprintf("/api/v1/accounts/%s/contacts?page=%d", cfg.AccountID, page)
+		respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
+		if err != nil {
+			break
+		}
+		var resp chatwootContactSearchResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			break
+		}
+		if len(resp.Payload) == 0 {
+			break
+		}
+		candidates = append(candidates, resp)
+		if len(resp.Payload) < 15 {
+			break
+		}
+	}
+
+	for _, resp := range candidates {
 		for _, item := range resp.Payload {
 			if item.ID <= 0 {
 				continue
@@ -521,6 +587,13 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 
 			if matchIdentifier || matchPhone {
 				return item.ID, nil
+			}
+
+			// If there is an inbox mapping with the same source_id, it is the same external contact.
+			for _, ci := range item.ContactInboxes {
+				if strings.EqualFold(strings.TrimSpace(ci.SourceID), identifier) {
+					return item.ID, nil
+				}
 			}
 		}
 	}
@@ -1201,6 +1274,23 @@ func normalizePhoneForCompare(raw string) string {
 		}
 	}
 	return b.String()
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		result = append(result, v)
+	}
+	return result
 }
 
 func normalizeChatwootFileType(fileType string, mimeType string) string {
