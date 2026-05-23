@@ -9,7 +9,6 @@ import (
 
 	_ "github.com/EvolutionAPI/evolution-go/docs"
 	call_handler "github.com/EvolutionAPI/evolution-go/pkg/call/handler"
-	chatwoot_handler "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/handler"
 	chat_handler "github.com/EvolutionAPI/evolution-go/pkg/chat/handler"
 	community_handler "github.com/EvolutionAPI/evolution-go/pkg/community/handler"
 	group_handler "github.com/EvolutionAPI/evolution-go/pkg/group/handler"
@@ -39,7 +38,6 @@ type Routes struct {
 	newsletterHandler       newsletter_handler.NewsletterHandler
 	pollHandler             *poll_handler.PollHandler
 	serverHandler           server_handler.ServerHandler
-	chatwootHandler         chatwoot_handler.ChatwootHandler
 }
 
 func (r *Routes) AssignRoutes(eng *gin.Engine) {
@@ -109,17 +107,6 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.PUT("/:instanceId/advanced-settings", r.instanceHandler.UpdateAdvancedSettings)
 		}
 	}
-
-	routes = eng.Group("/chatwoot")
-	{
-		routes.Use(r.authMiddleware.AuthAdmin)
-		{
-			routes.POST("/set/:instanceId", r.chatwootHandler.Set)
-			routes.GET("/find/:instanceId", r.chatwootHandler.Find)
-		}
-	}
-
-	eng.POST("/chatwoot/webhook/:instanceId", r.chatwootHandler.Webhook)
 
 	routes = eng.Group("/send")
 	{
@@ -272,7 +259,6 @@ func NewRouter(
 	newsletterHandler newsletter_handler.NewsletterHandler,
 	pollHandler *poll_handler.PollHandler,
 	serverHandler server_handler.ServerHandler,
-	chatwootHandler chatwoot_handler.ChatwootHandler,
 ) *Routes {
 	return &Routes{
 		authMiddleware:          authMiddleware,
@@ -289,6 +275,5 @@ func NewRouter(
 		newsletterHandler:       newsletterHandler,
 		pollHandler:             pollHandler,
 		serverHandler:           serverHandler,
-		chatwootHandler:         chatwootHandler,
 	}
 }
