@@ -18,6 +18,7 @@ import (
 	"github.com/gomessguii/logger"
 	"github.com/joho/godotenv"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 	"gorm.io/gorm"
 	_ "modernc.org/sqlite"
 
@@ -197,6 +198,27 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		chatwootRepository,
 		instanceRepository,
 		sendMessageService,
+		func(instanceID string, lidJID string) (string, bool) {
+			client := clientPointer[instanceID]
+			if client == nil || client.Store == nil || client.Store.LIDs == nil {
+				return "", false
+			}
+
+			lid, err := types.ParseJID(lidJID)
+			if err != nil || lid.Server != types.HiddenUserServer {
+				return "", false
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			pn, err := client.Store.LIDs.GetPNForLID(ctx, lid)
+			if err != nil || pn.IsEmpty() {
+				return "", false
+			}
+
+			return pn.String(), true
+		},
 		loggerWrapper,
 	)
 	event_observer.Register(chatwootService)

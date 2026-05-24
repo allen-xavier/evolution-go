@@ -38,6 +38,7 @@ type chatwootService struct {
 	repository         chatwoot_repository.ChatwootRepository
 	instanceRepository instance_repository.InstanceRepository
 	sendMessageService send_service.SendService
+	lidResolver        func(instanceID string, lidJID string) (string, bool)
 	httpClient         *http.Client
 	skipCache          *cache.Cache
 	webhookCache       *cache.Cache
@@ -138,6 +139,13 @@ type evolutionMessage struct {
 	MessageID       string
 	MessageSourceID string
 	FromMe          bool
+}
+
+type chatwootContactRef struct {
+	SourceID   string
+	Identifier string
+	Phone      string
+	Name       string
 }
 
 func (s *chatwootService) Set(instanceID string, payload *chatwoot_model.SetChatwootPayload) (*chatwoot_model.ChatwootConfigView, error) {
@@ -466,43 +474,39 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 
 func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string) (*chatwoot_model.ChatwootBinding, error) {
 	remoteJID = normalizeRemoteJID(remoteJID)
+	contactRef := buildChatwootContactRef(instance.Id, remoteJID, contactName, cfg.MergeBrazilContacts)
 
 	binding, err := s.repository.GetBindingByRemoteJID(instance.Id, remoteJID)
 	if err != nil {
 		return nil, err
 	}
-	if binding != nil {
+	if binding != nil && strings.EqualFold(strings.TrimSpace(binding.SourceID), contactRef.SourceID) {
 		return binding, nil
 	}
 
-	phone := toE164(remoteJID, cfg.MergeBrazilContacts)
-	contactName = strings.TrimSpace(contactName)
-	if contactName == "" {
-		contactName = phone
-	}
-	sourceID := chatwootSourceID(instance.Id, remoteJID)
-
-	contactID, err := s.createChatwootContact(cfg, contactName, phone, remoteJID)
+	contactID, err := s.createChatwootContact(cfg, contactRef)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := s.createChatwootContactInbox(cfg, contactID, sourceID); err != nil {
+	if err := s.createChatwootContactInbox(cfg, contactID, contactRef.SourceID); err != nil {
 		return nil, err
 	}
 
-	conversationID, err := s.createChatwootConversation(cfg, contactID, sourceID)
+	conversationID, err := s.createChatwootConversation(cfg, contactID, contactRef.SourceID)
 	if err != nil {
 		return nil, err
 	}
 
-	binding = &chatwoot_model.ChatwootBinding{
-		InstanceID:     instance.Id,
-		RemoteJID:      remoteJID,
-		ContactID:      contactID,
-		ConversationID: conversationID,
-		SourceID:       sourceID,
+	if binding == nil {
+		binding = &chatwoot_model.ChatwootBinding{
+			InstanceID: instance.Id,
+			RemoteJID:  remoteJID,
+		}
 	}
+	binding.ContactID = contactID
+	binding.ConversationID = conversationID
+	binding.SourceID = contactRef.SourceID
 
 	if err := s.repository.SaveBinding(binding); err != nil {
 		existing, lookupErr := s.repository.GetBindingByRemoteJID(instance.Id, remoteJID)
@@ -515,12 +519,14 @@ func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.In
 	return binding, nil
 }
 
-func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConfig, name string, phone string, identifier string) (int, error) {
+func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConfig, contactRef chatwootContactRef) (int, error) {
 	body := map[string]interface{}{
-		"inbox_id":     cfg.InboxID,
-		"name":         name,
-		"phone_number": phone,
-		"identifier":   identifier,
+		"inbox_id":   cfg.InboxID,
+		"name":       contactRef.Name,
+		"identifier": contactRef.Identifier,
+	}
+	if strings.TrimSpace(contactRef.Phone) != "" {
+		body["phone_number"] = contactRef.Phone
 	}
 
 	respBody, err := s.chatwootRequestJSON(http.MethodPost, cfg, fmt.Sprintf("/api/v1/accounts/%s/contacts", cfg.AccountID), body)
@@ -529,7 +535,7 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnprocessableEntity {
 			// Contact may already exist in the account (another inbox/instance).
 			// Reuse it to avoid stopping message sync.
-			existingID, lookupErr := s.findExistingContactID(cfg, identifier, phone)
+			existingID, lookupErr := s.findExistingContactID(cfg, contactRef)
 			if lookupErr == nil && existingID > 0 {
 				return existingID, nil
 			}
@@ -555,13 +561,15 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 	return 0, fmt.Errorf("chatwoot contact id not found in response")
 }
 
-func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConfig, identifier string, phone string) (int, error) {
-	identifier = strings.TrimSpace(identifier)
-	phone = strings.TrimSpace(phone)
+func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConfig, contactRef chatwootContactRef) (int, error) {
+	identifier := strings.TrimSpace(contactRef.Identifier)
+	phone := strings.TrimSpace(contactRef.Phone)
+	sourceID := strings.TrimSpace(contactRef.SourceID)
 	normalizedPhone := normalizePhoneForCompare(phone)
 
 	queries := uniqueNonEmptyStrings([]string{
 		identifier,
+		sourceID,
 		phone,
 		strings.TrimPrefix(phone, "+"),
 		normalizedPhone,
@@ -668,7 +676,8 @@ func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConf
 
 			// If there is an inbox mapping with the same source_id, it is the same external contact.
 			for _, ci := range item.ContactInboxes {
-				if strings.EqualFold(strings.TrimSpace(ci.SourceID), identifier) {
+				if strings.EqualFold(strings.TrimSpace(ci.SourceID), sourceID) ||
+					strings.EqualFold(strings.TrimSpace(ci.SourceID), identifier) {
 					return item.ID, nil
 				}
 			}
@@ -1079,7 +1088,7 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 	info := mapFromAny(mapLookup(data, "Info", "info"))
 	messageMap := mapFromAny(mapLookup(data, "Message", "message"))
 
-	remoteJID := normalizeRemoteJID(mapString(info, "Chat", "chat", "RemoteJID", "remoteJid"))
+	remoteJID := s.resolveEvolutionRemoteJID(payload, data, info)
 	if remoteJID == "" {
 		remoteJID = normalizeRemoteJID(mapString(data, "remoteJid", "remoteJID", "jid"))
 	}
@@ -1106,7 +1115,7 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 	contactName := strings.TrimSpace(firstNonEmptyString(
 		mapString(data, "PushName", "pushName"),
 		mapString(info, "PushName", "pushName"),
-		toE164(remoteJID, true),
+		contactNameFallback(remoteJID),
 	))
 
 	return evolutionMessage{
@@ -1170,6 +1179,37 @@ func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface
 	}
 
 	return "[message]", "", nil
+}
+
+func (s *chatwootService) resolveEvolutionRemoteJID(payload evolutionWebhookPayload, data map[string]interface{}, info map[string]interface{}) string {
+	remoteJID := normalizeRemoteJID(mapString(info, "Chat", "chat", "RemoteJID", "remoteJid"))
+	if remoteJID == "" {
+		remoteJID = normalizeRemoteJID(mapString(data, "remoteJid", "remoteJID", "jid"))
+	}
+	if !isLIDRemoteJID(remoteJID) {
+		return remoteJID
+	}
+
+	if pnJID := firstPhoneRemoteJID(
+		mapString(info, "SenderAlt", "senderAlt"),
+		mapString(info, "RecipientAlt", "recipientAlt"),
+		mapString(info, "Sender", "sender"),
+		mapString(data, "SenderAlt", "senderAlt"),
+		mapString(data, "RecipientAlt", "recipientAlt"),
+		mapString(data, "Sender", "sender"),
+	); pnJID != "" {
+		return pnJID
+	}
+
+	if s.lidResolver != nil && payload.InstanceID != "" {
+		if resolved, ok := s.lidResolver(payload.InstanceID, remoteJID); ok {
+			if pnJID := firstPhoneRemoteJID(resolved); pnJID != "" {
+				return pnJID
+			}
+		}
+	}
+
+	return remoteJID
 }
 
 func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, mediaMap map[string]interface{}, defaultType string) ([]byte, string) {
@@ -1266,8 +1306,7 @@ func toE164(jid string, mergeBrazilContacts bool) string {
 	base = strings.TrimSpace(base)
 	base = strings.TrimPrefix(base, "+")
 
-	if mergeBrazilContacts && len(base) == 13 && strings.HasPrefix(base, "55") {
-		// 55 + DDD(2) + 9 + number(8) => remove optional 9 for contact merge.
+	if mergeBrazilContacts && shouldRemoveBrazilNinthDigit(base) {
 		if base[4] == '9' {
 			base = base[:4] + base[5:]
 		}
@@ -1279,8 +1318,56 @@ func toE164(jid string, mergeBrazilContacts bool) string {
 	return "+" + base
 }
 
+func shouldRemoveBrazilNinthDigit(base string) bool {
+	if len(base) != 13 || !strings.HasPrefix(base, "55") || base[4] != '9' {
+		return false
+	}
+	ddd, err := strconv.Atoi(base[2:4])
+	if err != nil {
+		return false
+	}
+	return ddd >= 31
+}
+
+func contactNameFallback(remoteJID string) string {
+	if isLIDRemoteJID(remoteJID) {
+		return normalizeRemoteJID(remoteJID)
+	}
+	return toE164(remoteJID, true)
+}
+
+func buildChatwootContactRef(instanceID string, remoteJID string, contactName string, mergeBrazilContacts bool) chatwootContactRef {
+	remoteJID = normalizeRemoteJID(remoteJID)
+	sourceID := chatwootSourceID(instanceID, remoteJID)
+	phone := toE164(remoteJID, mergeBrazilContacts)
+	identifier := remoteJID
+
+	if isLIDRemoteJID(remoteJID) {
+		// LID is not a real phone number. Use an instance-scoped identifier to
+		// prevent Chatwoot from merging it into an unrelated phone contact.
+		phone = ""
+		identifier = sourceID
+	}
+
+	name := strings.TrimSpace(contactName)
+	if name == "" {
+		name = firstNonEmptyString(phone, remoteJID, sourceID)
+	}
+
+	return chatwootContactRef{
+		SourceID:   sourceID,
+		Identifier: identifier,
+		Phone:      phone,
+		Name:       name,
+	}
+}
+
 func chatwootSourceID(instanceID string, remoteJID string) string {
-	return strings.TrimSpace(instanceID) + ":" + normalizeRemoteJID(remoteJID)
+	remoteJID = normalizeRemoteJID(remoteJID)
+	if isLIDRemoteJID(remoteJID) {
+		return strings.TrimSpace(instanceID) + ":lid:" + remoteJID
+	}
+	return strings.TrimSpace(instanceID) + ":" + remoteJID
 }
 
 func remoteJIDFromSourceID(instanceID string, sourceID string) string {
@@ -1291,9 +1378,31 @@ func remoteJIDFromSourceID(instanceID string, sourceID string) string {
 
 	prefix := strings.TrimSpace(instanceID) + ":"
 	if strings.HasPrefix(sourceID, prefix) {
-		return normalizeRemoteJID(strings.TrimPrefix(sourceID, prefix))
+		remote := strings.TrimPrefix(sourceID, prefix)
+		if strings.HasPrefix(remote, "lid:") {
+			remote = strings.TrimPrefix(remote, "lid:")
+		}
+		return normalizeRemoteJID(remote)
 	}
 	return normalizeRemoteJID(sourceID)
+}
+
+func isLIDRemoteJID(remoteJID string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(remoteJID)), "@lid")
+}
+
+func isPhoneRemoteJID(remoteJID string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(remoteJID)), "@s.whatsapp.net")
+}
+
+func firstPhoneRemoteJID(values ...string) string {
+	for _, value := range values {
+		jid := normalizeRemoteJID(value)
+		if isPhoneRemoteJID(jid) {
+			return jid
+		}
+	}
+	return ""
 }
 
 func recipientForSend(remoteJID string) (string, *bool) {
@@ -1303,7 +1412,7 @@ func recipientForSend(remoteJID string) (string, *bool) {
 	if remoteJID == "" {
 		return "", nil
 	}
-	if strings.Contains(remoteJID, "@lid") ||
+	if isLIDRemoteJID(remoteJID) ||
 		strings.Contains(remoteJID, "@g.us") ||
 		strings.Contains(remoteJID, "@broadcast") ||
 		strings.Contains(remoteJID, "@newsletter") {
@@ -1631,12 +1740,14 @@ func NewChatwootService(
 	repository chatwoot_repository.ChatwootRepository,
 	instanceRepository instance_repository.InstanceRepository,
 	sendMessageService send_service.SendService,
+	lidResolver func(instanceID string, lidJID string) (string, bool),
 	loggerWrapper *logger_wrapper.LoggerManager,
 ) ChatwootService {
 	service := &chatwootService{
 		repository:         repository,
 		instanceRepository: instanceRepository,
 		sendMessageService: sendMessageService,
+		lidResolver:        lidResolver,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
