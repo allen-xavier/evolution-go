@@ -421,6 +421,9 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 	if payload.Event == "" {
 		payload.Event = evt.eventType
 	}
+	if payload.InstanceID == "" {
+		payload.InstanceID = instance.Id
+	}
 	if payload.Event != "Message" && payload.Event != "SendMessage" {
 		return
 	}
@@ -573,19 +576,11 @@ func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConf
 		return 0, err
 	}
 
-	var resp chatwootContactCreateResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
+	contactID, err := parseChatwootContactID(respBody)
+	if err != nil {
 		return 0, err
 	}
-
-	if resp.ID > 0 {
-		return resp.ID, nil
-	}
-	if len(resp.Payload) > 0 && resp.Payload[0].ID > 0 {
-		return resp.Payload[0].ID, nil
-	}
-
-	return 0, fmt.Errorf("chatwoot contact id not found in response")
+	return contactID, nil
 }
 
 func (s *chatwootService) findExistingContactID(cfg *chatwoot_model.ChatwootConfig, contactRef chatwootContactRef) (int, error) {
@@ -1498,6 +1493,119 @@ func normalizeEscapedDelimiter(value string) string {
 		return "\n"
 	}
 	return value
+}
+
+func parseChatwootContactID(respBody []byte) (int, error) {
+	var payload interface{}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return 0, err
+	}
+
+	contactID := findChatwootContactID(payload, 0)
+	if contactID > 0 {
+		return contactID, nil
+	}
+
+	return 0, fmt.Errorf("chatwoot contact id not found in response")
+}
+
+func findChatwootContactID(value interface{}, depth int) int {
+	if depth > 12 {
+		return 0
+	}
+
+	switch v := value.(type) {
+	case map[string]interface{}:
+		if id := intFromAny(mapLookup(v, "id")); id > 0 {
+			return id
+		}
+
+		for _, key := range []string{"contact", "payload", "data", "result"} {
+			child := mapLookup(v, key)
+			if child == nil {
+				continue
+			}
+			if id := findChatwootContactID(child, depth+1); id > 0 {
+				return id
+			}
+		}
+
+		for _, child := range v {
+			if id := findChatwootContactID(child, depth+1); id > 0 {
+				return id
+			}
+		}
+
+	case []interface{}:
+		for _, item := range v {
+			if id := findChatwootContactID(item, depth+1); id > 0 {
+				return id
+			}
+		}
+	}
+
+	return 0
+}
+
+func intFromAny(value interface{}) int {
+	switch v := value.(type) {
+	case nil:
+		return 0
+	case int:
+		if v > 0 {
+			return v
+		}
+	case int8:
+		if v > 0 {
+			return int(v)
+		}
+	case int16:
+		if v > 0 {
+			return int(v)
+		}
+	case int32:
+		if v > 0 {
+			return int(v)
+		}
+	case int64:
+		if v > 0 {
+			return int(v)
+		}
+	case uint:
+		return int(v)
+	case uint8:
+		return int(v)
+	case uint16:
+		return int(v)
+	case uint32:
+		return int(v)
+	case uint64:
+		return int(v)
+	case float32:
+		if v > 0 {
+			return int(v)
+		}
+	case float64:
+		if v > 0 {
+			return int(v)
+		}
+	case json.Number:
+		if i, err := v.Int64(); err == nil && i > 0 {
+			return int(i)
+		}
+		if f, err := v.Float64(); err == nil && f > 0 {
+			return int(f)
+		}
+	case string:
+		value := strings.TrimSpace(v)
+		if value == "" {
+			return 0
+		}
+		if i, err := strconv.Atoi(value); err == nil && i > 0 {
+			return i
+		}
+	}
+	return 0
 }
 
 func firstNonEmptyString(values ...string) string {

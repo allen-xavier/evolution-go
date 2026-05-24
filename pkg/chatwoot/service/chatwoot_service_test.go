@@ -241,3 +241,36 @@ func TestToE164DoesNotRemoveBrazilNinthDigitForDDD16(t *testing.T) {
 		t.Fatalf("unexpected ddd16 phone: %s", got)
 	}
 }
+
+func TestParseChatwootContactIDSupportsArrayPayload(t *testing.T) {
+	body := []byte(`{"payload":[{"id":321}]}`)
+	id, err := parseChatwootContactID(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 321 {
+		t.Fatalf("unexpected id: %d", id)
+	}
+}
+
+func TestParseChatwootContactIDSupportsObjectPayload(t *testing.T) {
+	body := []byte(`{"payload":{"contact":{"id":654}}}`)
+	id, err := parseChatwootContactID(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 654 {
+		t.Fatalf("unexpected id: %d", id)
+	}
+}
+
+func TestParseChatwootContactIDSupportsTopLevelID(t *testing.T) {
+	body := []byte(`{"id":"987"}`)
+	id, err := parseChatwootContactID(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 987 {
+		t.Fatalf("unexpected id: %d", id)
+	}
+}
