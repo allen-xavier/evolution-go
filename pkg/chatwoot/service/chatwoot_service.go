@@ -99,6 +99,11 @@ func (e *chatwootHTTPError) Error() string {
 	return fmt.Sprintf("chatwoot request failed [%d]: %s", e.StatusCode, e.Body)
 }
 
+func isChatwootNotFound(err error) bool {
+	var httpErr *chatwootHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
+}
+
 type chatwootWebhookPayload struct {
 	Event        string      `json:"event"`
 	ID           interface{} `json:"id"`
@@ -441,12 +446,6 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 		return
 	}
 
-	binding, err := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName)
-	if err != nil {
-		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to resolve Chatwoot binding: %v", instance.Id, err)
-		return
-	}
-
 	messageType := "incoming"
 	if message.FromMe {
 		messageType = "outgoing"
@@ -461,18 +460,46 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 	}
 
 	if len(message.Media) == 0 || message.MediaType == "" {
-		if err := s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, nil, ""); err != nil {
+		if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType, nil, ""); err != nil {
 			s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync message to Chatwoot: %v", instance.Id, err)
 		}
 		return
 	}
 
-	if err := s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, message.Media, message.MediaType); err != nil {
+	if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType, message.Media, message.MediaType); err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync media message to Chatwoot: %v", instance.Id, err)
 	}
 }
 
-func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string) (*chatwoot_model.ChatwootBinding, error) {
+func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
+	instance *instance_model.Instance,
+	cfg *chatwoot_model.ChatwootConfig,
+	message evolutionMessage,
+	messageType string,
+	media []byte,
+	mediaType string,
+) error {
+	binding, err := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName, false)
+	if err != nil {
+		return fmt.Errorf("failed to resolve Chatwoot binding: %v", err)
+	}
+
+	err = s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, media, mediaType)
+	if !isChatwootNotFound(err) {
+		return err
+	}
+
+	s.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Chatwoot binding not found remotely; recreating contact/conversation for %s", instance.Id, message.RemoteJID)
+
+	binding, refreshErr := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName, true)
+	if refreshErr != nil {
+		return fmt.Errorf("%v (failed to refresh Chatwoot binding: %v)", err, refreshErr)
+	}
+
+	return s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, media, mediaType)
+}
+
+func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string, forceRefresh bool) (*chatwoot_model.ChatwootBinding, error) {
 	remoteJID = normalizeRemoteJID(remoteJID)
 	contactRef := buildChatwootContactRef(instance.Id, remoteJID, contactName, cfg.MergeBrazilContacts)
 
@@ -480,7 +507,7 @@ func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.In
 	if err != nil {
 		return nil, err
 	}
-	if binding != nil && strings.EqualFold(strings.TrimSpace(binding.SourceID), contactRef.SourceID) {
+	if !forceRefresh && binding != nil && strings.EqualFold(strings.TrimSpace(binding.SourceID), contactRef.SourceID) {
 		return binding, nil
 	}
 
@@ -1060,6 +1087,13 @@ func (s *chatwootService) chatwootRequestMultipart(
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusNotFound {
+			return &chatwootHTTPError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+			}
+		}
+
 		// Fallback when attachment upload fails: keep text sync and preserve media metadata.
 		fallbackContent := fmt.Sprintf("%s\n[attachment:%s upload_failed]", content, mediaType)
 		fallbackBody := map[string]interface{}{
