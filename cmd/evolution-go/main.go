@@ -18,7 +18,6 @@ import (
 	"github.com/gomessguii/logger"
 	"github.com/joho/godotenv"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/types"
 	"gorm.io/gorm"
 	_ "modernc.org/sqlite"
 
@@ -26,17 +25,12 @@ import (
 	call_service "github.com/EvolutionAPI/evolution-go/pkg/call/service"
 	chat_handler "github.com/EvolutionAPI/evolution-go/pkg/chat/handler"
 	chat_service "github.com/EvolutionAPI/evolution-go/pkg/chat/service"
-	chatwoot_handler "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/handler"
-	chatwoot_model "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/model"
-	chatwoot_repository "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/repository"
-	chatwoot_service "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/service"
 	community_handler "github.com/EvolutionAPI/evolution-go/pkg/community/handler"
 	community_service "github.com/EvolutionAPI/evolution-go/pkg/community/service"
 	config "github.com/EvolutionAPI/evolution-go/pkg/config"
 	"github.com/EvolutionAPI/evolution-go/pkg/core"
 	producer_interfaces "github.com/EvolutionAPI/evolution-go/pkg/events/interfaces"
 	nats_producer "github.com/EvolutionAPI/evolution-go/pkg/events/nats"
-	event_observer "github.com/EvolutionAPI/evolution-go/pkg/events/observer"
 	rabbitmq_producer "github.com/EvolutionAPI/evolution-go/pkg/events/rabbitmq"
 	webhook_producer "github.com/EvolutionAPI/evolution-go/pkg/events/webhook"
 	websocket_producer "github.com/EvolutionAPI/evolution-go/pkg/events/websocket"
@@ -166,7 +160,6 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	instanceRepository := instance_repository.NewInstanceRepository(db)
 	messageRepository := message_repository.NewMessageRepository(db)
 	labelRepository := label_repository.NewLabelRepository(db)
-	chatwootRepository := chatwoot_repository.NewChatwootRepository(db)
 
 	whatsmeowService := whatsmeow_service.NewWhatsmeowService(
 		instanceRepository,
@@ -194,34 +187,6 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		loggerWrapper,
 	)
 	sendMessageService := send_service.NewSendService(clientPointer, whatsmeowService, config, loggerWrapper)
-	chatwootService := chatwoot_service.NewChatwootService(
-		chatwootRepository,
-		instanceRepository,
-		sendMessageService,
-		func(instanceID string, lidJID string) (string, bool) {
-			client := clientPointer[instanceID]
-			if client == nil || client.Store == nil || client.Store.LIDs == nil {
-				return "", false
-			}
-
-			lid, err := types.ParseJID(lidJID)
-			if err != nil || lid.Server != types.HiddenUserServer {
-				return "", false
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			pn, err := client.Store.LIDs.GetPNForLID(ctx, lid)
-			if err != nil || pn.IsEmpty() {
-				return "", false
-			}
-
-			return pn.String(), true
-		},
-		loggerWrapper,
-	)
-	event_observer.Register(chatwootService)
 	userService := user_service.NewUserService(clientPointer, whatsmeowService, loggerWrapper)
 	messageService := message_service.NewMessageService(clientPointer, messageRepository, whatsmeowService, loggerWrapper)
 	chatService := chat_service.NewChatService(clientPointer, whatsmeowService, loggerWrapper)
@@ -269,7 +234,6 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		newsletter_handler.NewNewsletterHandler(newsletterService),
 		pollHandler,
 		server_handler.NewServerHandler(),
-		chatwoot_handler.NewChatwootHandler(chatwootService),
 	).AssignRoutes(r)
 
 	if config.ConnectOnStartup {
@@ -297,51 +261,12 @@ func migrate(db *gorm.DB) {
 		&instance_model.Instance{},
 		&message_model.Message{},
 		&label_model.Label{},
-		&chatwoot_model.ChatwootConfig{},
-		&chatwoot_model.ChatwootBinding{},
 	)
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := ensureChatwootBindingsCompatibility(db); err != nil {
-		logger.LogWarn("chatwoot bindings compatibility migration failed: %v", err)
-	}
-}
-
-func ensureChatwootBindingsCompatibility(db *gorm.DB) error {
-	if !db.Migrator().HasTable(&chatwoot_model.ChatwootBinding{}) {
-		return nil
-	}
-
-	// Target schema for current versions.
-	if !db.Migrator().HasColumn("chatwoot_bindings", "remote_jid") {
-		if err := db.Exec("ALTER TABLE chatwoot_bindings ADD COLUMN IF NOT EXISTS remote_jid VARCHAR(191)").Error; err != nil {
-			return err
-		}
-	}
-
-	legacyColumns := []string{"remote_j_id", "remotejid"}
-	for _, legacy := range legacyColumns {
-		if !db.Migrator().HasColumn("chatwoot_bindings", legacy) {
-			continue
-		}
-		query := fmt.Sprintf(
-			"UPDATE chatwoot_bindings SET remote_jid = %s WHERE (remote_jid IS NULL OR remote_jid = '') AND %s IS NOT NULL AND %s <> ''",
-			legacy, legacy, legacy,
-		)
-		if err := db.Exec(query).Error; err != nil {
-			return err
-		}
-		break
-	}
-
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_chatwoot_bindings_instance_remote_jid ON chatwoot_bindings (instance_id, remote_jid)").Error; err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func initAuthDB(config *config.Config) (*sql.DB, string, error) {

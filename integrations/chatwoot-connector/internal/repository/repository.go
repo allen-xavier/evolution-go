@@ -1,4 +1,4 @@
-package chatwoot_repository
+package repository
 
 import (
 	"errors"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	chatwoot_model "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/model"
+	chatwoot_model "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
 	"gorm.io/gorm"
 )
 

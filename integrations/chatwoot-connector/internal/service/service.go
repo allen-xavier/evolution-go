@@ -1,7 +1,8 @@
-package chatwoot_service
+package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,12 +19,10 @@ import (
 	"strings"
 	"time"
 
-	chatwoot_model "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/model"
-	chatwoot_repository "github.com/EvolutionAPI/evolution-go/pkg/chatwoot/repository"
-	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
-	instance_repository "github.com/EvolutionAPI/evolution-go/pkg/instance/repository"
-	logger_wrapper "github.com/EvolutionAPI/evolution-go/pkg/logger"
-	send_service "github.com/EvolutionAPI/evolution-go/pkg/sendMessage/service"
+	evolution "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/evolution"
+	logger_wrapper "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/logging"
+	chatwoot_model "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
+	chatwoot_repository "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/repository"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -31,26 +30,23 @@ type ChatwootService interface {
 	Set(instanceID string, payload *chatwoot_model.SetChatwootPayload) (*chatwoot_model.ChatwootConfigView, error)
 	Find(instanceID string) (*chatwoot_model.ChatwootConfigView, error)
 	HandleWebhook(instanceID string, headers http.Header, body []byte) error
-	HandleEvolutionEvent(instance *instance_model.Instance, eventType string, queueName string, payload []byte)
+	HandleEvolutionEvent(payload []byte) error
 }
 
 type chatwootService struct {
-	repository         chatwoot_repository.ChatwootRepository
-	instanceRepository instance_repository.InstanceRepository
-	sendMessageService send_service.SendService
-	lidResolver        func(instanceID string, lidJID string) (string, bool)
-	httpClient         *http.Client
-	skipCache          *cache.Cache
-	webhookCache       *cache.Cache
-	eventQueue         chan chatwootEvent
-	loggerWrapper      *logger_wrapper.LoggerManager
+	repository      chatwoot_repository.ChatwootRepository
+	evolutionClient evolution.API
+	lidResolver     func(instanceID string, lidJID string) (string, bool)
+	httpClient      *http.Client
+	skipCache       *cache.Cache
+	webhookCache    *cache.Cache
+	eventQueue      chan chatwootEvent
+	loggerWrapper   *logger_wrapper.Manager
 }
 
 type chatwootEvent struct {
-	instance  *instance_model.Instance
-	eventType string
-	queueName string
-	payload   []byte
+	instance *evolution.Instance
+	payload  []byte
 }
 
 type chatwootContactCreateResponse struct {
@@ -157,7 +153,7 @@ func (s *chatwootService) Set(instanceID string, payload *chatwoot_model.SetChat
 	if payload == nil {
 		return nil, fmt.Errorf("payload is required")
 	}
-	if _, err := s.instanceRepository.GetInstanceByID(instanceID); err != nil {
+	if _, err := s.evolutionClient.GetInstance(context.Background(), instanceID); err != nil {
 		return nil, err
 	}
 
@@ -231,10 +227,6 @@ func (s *chatwootService) Set(instanceID string, payload *chatwoot_model.SetChat
 }
 
 func (s *chatwootService) Find(instanceID string) (*chatwoot_model.ChatwootConfigView, error) {
-	if _, err := s.instanceRepository.GetInstanceByID(instanceID); err != nil {
-		return nil, err
-	}
-
 	cfg, err := s.repository.GetConfig(instanceID)
 	if err != nil {
 		return nil, err
@@ -285,6 +277,9 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return err
 	}
+	if cfg.InboxID > 0 && payload.Conversation.InboxID > 0 && payload.Conversation.InboxID != cfg.InboxID {
+		return nil
+	}
 
 	if payload.Event != "message_created" {
 		return nil
@@ -305,7 +300,7 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		return nil
 	}
 
-	instance, err := s.instanceRepository.GetInstanceByID(instanceID)
+	instance, err := s.evolutionClient.GetInstance(context.Background(), instanceID)
 	if err != nil {
 		s.webhookCache.Delete(webhookKey)
 		return err
@@ -370,26 +365,29 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	return nil
 }
 
-func (s *chatwootService) HandleEvolutionEvent(instance *instance_model.Instance, eventType string, queueName string, payload []byte) {
-	if instance == nil {
-		return
+func (s *chatwootService) HandleEvolutionEvent(raw []byte) error {
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("invalid evolution webhook: %w", err)
 	}
-	if eventType != "Message" && eventType != "SendMessage" {
-		return
+	if payload.Event != "Message" && payload.Event != "SendMessage" {
+		return nil
+	}
+	if strings.TrimSpace(payload.InstanceID) == "" {
+		return fmt.Errorf("evolution webhook is missing instanceId")
 	}
 
 	event := chatwootEvent{
-		instance:  instance,
-		eventType: eventType,
-		queueName: queueName,
-		payload:   append([]byte(nil), payload...),
+		instance: &evolution.Instance{Id: payload.InstanceID, Name: payload.InstanceName},
+		payload:  append([]byte(nil), raw...),
 	}
 
 	select {
 	case s.eventQueue <- event:
 	default:
-		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Chatwoot event queue is full; dropping %s event", instance.Id, eventType)
+		return fmt.Errorf("chatwoot event queue is full")
 	}
+	return nil
 }
 
 func (s *chatwootService) runEventWorker() {
@@ -417,9 +415,6 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 	if err := json.Unmarshal(evt.payload, &payload); err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to parse Evolution event for Chatwoot: %v", instance.Id, err)
 		return
-	}
-	if payload.Event == "" {
-		payload.Event = evt.eventType
 	}
 	if payload.InstanceID == "" {
 		payload.InstanceID = instance.Id
@@ -475,7 +470,7 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 }
 
 func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
-	instance *instance_model.Instance,
+	instance *evolution.Instance,
 	cfg *chatwoot_model.ChatwootConfig,
 	message evolutionMessage,
 	messageType string,
@@ -502,7 +497,7 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 	return s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, media, mediaType)
 }
 
-func (s *chatwootService) getOrCreateBindingByRemote(instance *instance_model.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string, forceRefresh bool) (*chatwoot_model.ChatwootBinding, error) {
+func (s *chatwootService) getOrCreateBindingByRemote(instance *evolution.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string, forceRefresh bool) (*chatwoot_model.ChatwootBinding, error) {
 	remoteJID = normalizeRemoteJID(remoteJID)
 	contactRef := buildChatwootContactRef(instance.Id, remoteJID, contactName, cfg.MergeBrazilContacts)
 
@@ -830,7 +825,7 @@ func (s *chatwootService) sendMessageToChatwoot(
 }
 
 func (s *chatwootService) sendTextFromChatwoot(
-	instance *instance_model.Instance,
+	instance *evolution.Instance,
 	remoteJID string,
 	content string,
 	chatwootMessageID string,
@@ -844,12 +839,12 @@ func (s *chatwootService) sendTextFromChatwoot(
 	messageID := chatwootOutboundMessageID(instance.Id, chatwootMessageID, "text")
 	s.skipCache.Set(fmt.Sprintf("%s:%s", instance.Id, messageID), true, 10*time.Minute)
 
-	_, err := s.sendMessageService.SendText(&send_service.TextStruct{
+	err := s.evolutionClient.SendText(context.Background(), instance, evolution.TextRequest{
 		Number:    number,
 		Text:      text,
-		Id:        messageID,
-		FormatJid: formatJID,
-	}, instance)
+		ID:        messageID,
+		FormatJID: formatJID,
+	})
 	if err != nil {
 		s.skipCache.Delete(fmt.Sprintf("%s:%s", instance.Id, messageID))
 		return err
@@ -860,7 +855,7 @@ func (s *chatwootService) sendTextFromChatwoot(
 }
 
 func (s *chatwootService) sendMediaFromChatwoot(
-	instance *instance_model.Instance,
+	instance *evolution.Instance,
 	remoteJID string,
 	dataURL string,
 	fileType string,
@@ -883,14 +878,15 @@ func (s *chatwootService) sendMediaFromChatwoot(
 	messageID := chatwootOutboundMessageID(instance.Id, chatwootMessageID, "media:"+dataURL)
 	s.skipCache.Set(fmt.Sprintf("%s:%s", instance.Id, messageID), true, 10*time.Minute)
 
-	_, err = s.sendMessageService.SendMediaFile(&send_service.MediaStruct{
+	err = s.evolutionClient.SendMedia(context.Background(), instance, evolution.MediaRequest{
 		Number:    number,
 		Type:      mediaKind,
 		Caption:   caption,
 		Filename:  fileName,
-		Id:        messageID,
-		FormatJid: formatJID,
-	}, fileData, instance)
+		ID:        messageID,
+		FormatJID: formatJID,
+		Data:      fileData,
+	})
 	if err != nil {
 		s.skipCache.Delete(fmt.Sprintf("%s:%s", instance.Id, messageID))
 		return err
@@ -1880,16 +1876,14 @@ func webhookMessageID(id interface{}) string {
 
 func NewChatwootService(
 	repository chatwoot_repository.ChatwootRepository,
-	instanceRepository instance_repository.InstanceRepository,
-	sendMessageService send_service.SendService,
+	evolutionClient evolution.API,
 	lidResolver func(instanceID string, lidJID string) (string, bool),
-	loggerWrapper *logger_wrapper.LoggerManager,
+	loggerWrapper *logger_wrapper.Manager,
 ) ChatwootService {
 	service := &chatwootService{
-		repository:         repository,
-		instanceRepository: instanceRepository,
-		sendMessageService: sendMessageService,
-		lidResolver:        lidResolver,
+		repository:      repository,
+		evolutionClient: evolutionClient,
+		lidResolver:     lidResolver,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},

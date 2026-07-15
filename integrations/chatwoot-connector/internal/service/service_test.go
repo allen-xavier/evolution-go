@@ -1,4 +1,4 @@
-package chatwoot_service
+package service
 
 import (
 	"encoding/base64"

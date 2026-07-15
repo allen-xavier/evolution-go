@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Evolution + Chatwoot</title>
+  <style>
+    :root {
+      --bg: #080b12;
+      --panel: #10151f;
+      --panel-2: #151c28;
+      --border: #242e3d;
+      --text: #f3f7fb;
+      --muted: #8f9caf;
+      --primary: #26d98b;
+      --primary-dark: #0d9c62;
+      --danger: #ff6b73;
+      --warning: #f7bd54;
+      --shadow: 0 22px 60px rgba(0, 0, 0, .32);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--text); background:
+      radial-gradient(circle at 15% -10%, rgba(38, 217, 139, .12), transparent 32rem),
+      radial-gradient(circle at 95% 15%, rgba(50, 118, 255, .09), transparent 30rem), var(--bg); }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+    .hidden { display: none !important; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 330px minmax(0, 1fr); }
+    .sidebar { padding: 28px 22px; border-right: 1px solid var(--border); background: rgba(11, 15, 23, .82); backdrop-filter: blur(18px); }
+    .brand { display: flex; gap: 12px; align-items: center; margin: 0 6px 30px; }
+    .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 13px; color: #06150e; font-weight: 900; font-size: 20px; background: linear-gradient(135deg, #53f4ac, #18b975); box-shadow: 0 10px 28px rgba(38, 217, 139, .22); }
+    .brand h1 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .sidebar-title { display: flex; justify-content: space-between; align-items: center; margin: 0 6px 12px; }
+    .sidebar-title span { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .icon-btn { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); background: var(--panel); }
+    .icon-btn:hover { color: var(--text); border-color: #3a485c; }
+    .instances { display: grid; gap: 8px; }
+    .instance { width: 100%; padding: 13px; display: grid; grid-template-columns: 10px 1fr auto; gap: 11px; align-items: center; text-align: left; color: var(--text); border: 1px solid transparent; border-radius: 13px; background: transparent; }
+    .instance:hover { background: rgba(255, 255, 255, .035); }
+    .instance.active { border-color: #2d614d; background: rgba(38, 217, 139, .08); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #556174; box-shadow: 0 0 0 4px rgba(85, 97, 116, .1); }
+    .dot.online { background: var(--primary); box-shadow: 0 0 0 4px rgba(38, 217, 139, .12); }
+    .instance-name { min-width: 0; }
+    .instance-name strong, .instance-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .instance-name strong { font-size: 14px; }
+    .instance-name small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .state { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+    .sidebar-footer { position: fixed; bottom: 24px; left: 28px; color: var(--muted); font-size: 11px; }
+    main { padding: 38px clamp(24px, 5vw, 72px) 70px; overflow: hidden; }
+    .topbar { max-width: 1060px; margin: 0 auto 26px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .eyebrow { color: var(--primary); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .topbar h2 { margin: 7px 0 4px; font-size: clamp(25px, 3vw, 36px); letter-spacing: -.045em; }
+    .topbar p { margin: 0; color: var(--muted); }
+    .actions { display: flex; gap: 9px; flex-shrink: 0; }
+    .btn { min-height: 42px; padding: 0 17px; border: 1px solid var(--border); border-radius: 11px; color: var(--text); font-weight: 750; font-size: 13px; background: var(--panel-2); }
+    .btn:hover { transform: translateY(-1px); border-color: #3b4a60; }
+    .btn.primary { border-color: transparent; color: #04150d; background: linear-gradient(135deg, #51eda8, #22c87d); }
+    .btn:disabled { cursor: wait; opacity: .55; transform: none; }
+    .content { max-width: 1060px; margin: auto; display: grid; gap: 18px; }
+    .empty { min-height: 420px; display: grid; place-items: center; text-align: center; border: 1px dashed #2d3849; border-radius: 18px; color: var(--muted); background: rgba(16, 21, 31, .45); }
+    .empty strong { display: block; margin-bottom: 8px; color: var(--text); font-size: 17px; }
+    .card { padding: 24px; border: 1px solid var(--border); border-radius: 18px; background: linear-gradient(155deg, rgba(21, 28, 40, .96), rgba(14, 19, 28, .96)); box-shadow: var(--shadow); }
+    .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 21px; }
+    .card h3 { margin: 0; font-size: 16px; }
+    .card-sub { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .switch-wrap { display: flex; gap: 10px; align-items: center; font-size: 13px; font-weight: 700; }
+    .switch { position: relative; width: 46px; height: 26px; }
+    .switch input { position: absolute; opacity: 0; }
+    .slider { position: absolute; inset: 0; border-radius: 99px; background: #303b4b; transition: .2s; }
+    .slider::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; border-radius: 50%; background: white; transition: .2s; }
+    .switch input:checked + .slider { background: var(--primary-dark); }
+    .switch input:checked + .slider::after { transform: translateX(20px); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    label.label { display: block; margin: 0 0 7px; color: #cbd4df; font-size: 12px; font-weight: 700; }
+    input[type="text"], input[type="url"], input[type="password"], input[type="number"], textarea { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid #2a3545; border-radius: 10px; outline: none; color: var(--text); background: #0c111a; transition: .15s; }
+    textarea { min-height: 82px; resize: vertical; }
+    input:focus, textarea:focus { border-color: var(--primary-dark); box-shadow: 0 0 0 3px rgba(38, 217, 139, .09); }
+    .hint { margin: 6px 0 0; color: #748196; font-size: 10px; line-height: 1.45; }
+    .checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+    .check { min-height: 48px; padding: 11px 12px; display: flex; align-items: center; gap: 9px; border: 1px solid #263142; border-radius: 11px; color: #cbd4df; background: rgba(7, 11, 17, .38); font-size: 12px; }
+    .check input { width: 16px; height: 16px; accent-color: var(--primary); }
+    .webhook { display: flex; gap: 8px; }
+    .webhook input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .toast { position: fixed; right: 24px; bottom: 24px; z-index: 50; max-width: min(430px, calc(100vw - 48px)); padding: 13px 17px; border: 1px solid #315945; border-radius: 12px; color: #dffbed; background: #10261c; box-shadow: var(--shadow); font-size: 13px; }
+    .toast.error { border-color: #69353a; color: #ffdfe1; background: #2a1518; }
+    .overlay { position: fixed; z-index: 100; inset: 0; padding: 22px; display: grid; place-items: center; background: rgba(3, 5, 9, .82); backdrop-filter: blur(12px); }
+    .login { width: min(430px, 100%); padding: 29px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); }
+    .login .brand-mark { margin-bottom: 21px; }
+    .login h2 { margin: 0; font-size: 24px; letter-spacing: -.035em; }
+    .login p { margin: 9px 0 22px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .login .btn { width: 100%; margin-top: 12px; }
+    .login-error { min-height: 18px; margin: 10px 0 -3px; color: var(--danger); font-size: 11px; }
+    .loading { opacity: .55; pointer-events: none; }
+    @media (max-width: 880px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { position: relative; padding: 19px 18px; border-right: 0; border-bottom: 1px solid var(--border); }
+      .brand { margin-bottom: 17px; }
+      .instances { display: flex; overflow-x: auto; padding-bottom: 4px; }
+      .instance { min-width: 230px; }
+      .sidebar-footer { display: none; }
+      main { padding: 27px 18px 55px; }
+      .checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 600px) {
+      .topbar { display: block; }
+      .actions { margin-top: 17px; }
+      .actions .btn { flex: 1; }
+      .grid, .checks { grid-template-columns: 1fr; }
+      .card { padding: 19px; }
+      .card-head { align-items: center; }
+      .webhook { display: grid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">E</div>
+        <div><h1>Evolution + Chatwoot</h1><p>Conector independente</p></div>
+      </div>
+      <div class="sidebar-title">
+        <span>Instâncias</span>
+        <button id="refreshBtn" class="icon-btn" title="Atualizar instâncias" aria-label="Atualizar instâncias">↻</button>
+      </div>
+      <div id="instances" class="instances"></div>
+      <div class="sidebar-footer">Connector Admin · v0.2.0</div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Configuração centralizada</div>
+          <h2 id="pageTitle">Integração Chatwoot</h2>
+          <p id="pageSubtitle">Selecione uma instância para começar.</p>
+        </div>
+        <div class="actions">
+          <button id="logoutBtn" class="btn">Trocar chave</button>
+          <button id="saveBtn" class="btn primary" disabled>Salvar configuração</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section id="empty" class="empty">
+          <div><strong>Nenhuma instância selecionada</strong>As instâncias criadas na Evolution aparecerão automaticamente aqui.</div>
+        </section>
+
+        <form id="configForm" class="hidden" autocomplete="off">
+          <section class="card">
+            <div class="card-head">
+              <div><h3>Conexão com o Chatwoot</h3><p class="card-sub">Credenciais e caixa que receberão as conversas desta instância.</p></div>
+              <div class="switch-wrap"><span>Integração ativa</span><label class="switch"><input id="enabled" type="checkbox"><span class="slider"></span></label></div>
+            </div>
+            <div class="grid">
+              <div class="field full"><label class="label" for="url">URL do Chatwoot</label><input id="url" type="url" placeholder="https://chatwoot.seudominio.com"></div>
+              <div class="field"><label class="label" for="accountId">ID da conta</label><input id="accountId" type="text" inputmode="numeric" placeholder="1"></div>
+              <div class="field"><label class="label" for="inboxId">ID da caixa de entrada</label><input id="inboxId" type="number" min="0" placeholder="1"></div>
+              <div class="field full"><label class="label" for="token">Token de acesso do Chatwoot</label><input id="token" type="password" placeholder="Token do perfil do agente administrador"><p class="hint">Chatwoot → Configurações do perfil → Token de acesso.</p></div>
+              <div class="field"><label class="label" for="nameInbox">Nome da caixa</label><input id="nameInbox" type="text" placeholder="WhatsApp Comercial"></div>
+              <div class="field"><label class="label" for="inboxIdentifier">Identificador da caixa</label><input id="inboxIdentifier" type="text" placeholder="Opcional"></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><div><h3>Comportamento das conversas</h3><p class="card-sub">Escolha como mensagens, contatos e conversas serão sincronizados.</p></div></div>
+            <div class="checks">
+              <label class="check"><input id="signMsg" type="checkbox">Assinar mensagens</label>
+              <label class="check"><input id="reopenConversation" type="checkbox">Reabrir conversas</label>
+              <label class="check"><input id="conversationPending" type="checkbox">Criar como pendente</label>
+              <label class="check"><input id="mergeBrazilContacts" type="checkbox">Unificar contatos BR</label>
+              <label class="check"><input id="importContacts" type="checkbox">Importar contatos</label>
+              <label class="check"><input id="importMessages" type="checkbox">Importar mensagens</label>
+            </div>
+            <div class="grid" style="margin-top:17px">
+              <div class="field"><label class="label" for="signDelimiter">Separador da assinatura</label><input id="signDelimiter" type="text" placeholder="\n"><p class="hint">Use \n para colocar a assinatura em uma nova linha.</p></div>
+              <div class="field"><label class="label" for="daysLimitImportMessages">Limite da importação (dias)</label><input id="daysLimitImportMessages" type="number" min="1" value="3"></div>
+              <div class="field full"><label class="label" for="ignoreJids">JIDs ignorados</label><textarea id="ignoreJids" placeholder="Um JID por linha ou separados por vírgula"></textarea></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><div><h3>Webhook e segurança</h3><p class="card-sub">Cadastre a URL abaixo no Chatwoot para o evento <b>message_created</b>.</p></div></div>
+            <div class="grid">
+              <div class="field full"><label class="label" for="webhookUrl">URL do webhook desta instância</label><div class="webhook"><input id="webhookUrl" type="text" readonly><button id="copyBtn" class="btn" type="button">Copiar URL</button></div></div>
+              <div class="field full"><label class="label" for="webhookSecret">Segredo do webhook (opcional)</label><input id="webhookSecret" type="password" placeholder="Use o mesmo segredo configurado no Chatwoot"><p class="hint">Se preenchido, o conector valida a assinatura antes de processar a mensagem.</p></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><div><h3>Identidade (opcional)</h3><p class="card-sub">Metadados mantidos por compatibilidade com a integração original.</p></div></div>
+            <div class="grid">
+              <div class="field"><label class="label" for="organization">Organização</label><input id="organization" type="text"></div>
+              <div class="field"><label class="label" for="logo">URL do logo</label><input id="logo" type="url"></div>
+            </div>
+          </section>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <div id="loginOverlay" class="overlay">
+    <form id="loginForm" class="login">
+      <div class="brand-mark">E</div>
+      <h2>Acessar o conector</h2>
+      <p>Informe a mesma <b>GLOBAL_API_KEY</b> usada na stack. A chave fica somente nesta aba do navegador.</p>
+      <label class="label" for="apiKey">Chave global da API</label>
+      <input id="apiKey" type="password" required autofocus placeholder="GLOBAL_API_KEY">
+      <div id="loginError" class="login-error"></div>
+      <button id="loginBtn" class="btn primary" type="submit">Entrar</button>
+    </form>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    (() => {
+      'use strict';
+      const base = '/chatwoot';
+      const $ = id => document.getElementById(id);
+      const state = { key: sessionStorage.getItem('connectorApiKey') || '', instances: [], selected: null };
+      const fields = ['enabled','url','accountId','token','inboxId','inboxIdentifier','signMsg','reopenConversation','conversationPending','mergeBrazilContacts','importContacts','importMessages','daysLimitImportMessages','nameInbox','signDelimiter','organization','logo','webhookSecret'];
+      let toastTimer;
+
+      function toast(message, error = false) {
+        clearTimeout(toastTimer);
+        $('toast').textContent = message;
+        $('toast').className = 'toast' + (error ? ' error' : '');
+        toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 4200);
+      }
+
+      async function api(path, options = {}) {
+        const headers = new Headers(options.headers || {});
+        headers.set('apikey', state.key);
+        if (options.body) headers.set('Content-Type', 'application/json');
+        const response = await fetch(base + path, { ...options, headers });
+        let payload = {};
+        try { payload = await response.json(); } catch (_) {}
+        if (response.status === 401) {
+          sessionStorage.removeItem('connectorApiKey');
+          state.key = '';
+          $('loginOverlay').classList.remove('hidden');
+          throw new Error('Chave de API inválida.');
+        }
+        if (!response.ok) throw new Error(payload.error || `Erro HTTP ${response.status}`);
+        return payload;
+      }
+
+      function renderInstances() {
+        const container = $('instances');
+        container.replaceChildren();
+        const sorted = [...state.instances].sort((a, b) => Number(b.connected) - Number(a.connected) || (a.name || '').localeCompare(b.name || ''));
+        if (!sorted.length) {
+          const note = document.createElement('div');
+          note.className = 'card-sub';
+          note.style.padding = '12px 6px';
+          note.textContent = 'Nenhuma instância encontrada.';
+          container.append(note);
+          return;
+        }
+        sorted.forEach(instance => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'instance' + (state.selected?.id === instance.id ? ' active' : '');
+          const dot = document.createElement('span'); dot.className = 'dot' + (instance.connected ? ' online' : '');
+          const names = document.createElement('span'); names.className = 'instance-name';
+          const strong = document.createElement('strong'); strong.textContent = instance.name || 'Sem nome';
+          const small = document.createElement('small'); small.textContent = instance.jid || instance.id;
+          const status = document.createElement('span'); status.className = 'state'; status.textContent = instance.connected ? 'online' : 'offline';
+          names.append(strong, small); button.append(dot, names, status);
+          button.addEventListener('click', () => selectInstance(instance));
+          container.append(button);
+        });
+      }
+
+      async function loadInstances(selectFirst = true) {
+        $('refreshBtn').disabled = true;
+        try {
+          const response = await api('/instances');
+          state.instances = response.data || [];
+          renderInstances();
+          if (selectFirst && !state.selected && state.instances.length) {
+            const first = state.instances.find(item => item.connected) || state.instances[0];
+            await selectInstance(first);
+          }
+        } finally { $('refreshBtn').disabled = false; }
+      }
+
+      function setField(id, value) {
+        const el = $(id);
+        if (el.type === 'checkbox') el.checked = Boolean(value);
+        else el.value = value ?? '';
+      }
+
+      async function selectInstance(instance) {
+        state.selected = instance;
+        renderInstances();
+        $('configForm').classList.remove('hidden');
+        $('empty').classList.add('hidden');
+        $('saveBtn').disabled = true;
+        $('pageTitle').textContent = instance.name || 'Instância sem nome';
+        $('pageSubtitle').textContent = instance.connected ? `Conectada · ${instance.jid || instance.id}` : `Desconectada · ${instance.disconnectReason || instance.id}`;
+        $('configForm').classList.add('loading');
+        try {
+          const response = await api('/find/' + encodeURIComponent(instance.id));
+          const config = response.data || {};
+          fields.forEach(id => setField(id, config[id]));
+          setField('signMsg', config.signMsg ?? true);
+          setField('reopenConversation', config.reopenConversation ?? true);
+          setField('mergeBrazilContacts', config.mergeBrazilContacts ?? true);
+          setField('importContacts', config.importContacts ?? true);
+          setField('importMessages', config.importMessages ?? true);
+          setField('daysLimitImportMessages', config.daysLimitImportMessages || 3);
+          setField('signDelimiter', (config.signDelimiter || '\n').replace(/\n/g, '\\n'));
+          $('ignoreJids').value = (config.ignoreJids || []).join('\n');
+          $('webhookUrl').value = location.origin + base + '/webhook/' + instance.id;
+          $('saveBtn').disabled = false;
+        } catch (error) { toast(error.message, true); }
+        finally { $('configForm').classList.remove('loading'); }
+      }
+
+      function formPayload() {
+        const bools = ['enabled','signMsg','reopenConversation','conversationPending','mergeBrazilContacts','importContacts','importMessages'];
+        const payload = {};
+        fields.forEach(id => payload[id] = bools.includes(id) ? $(id).checked : $(id).value.trim());
+        payload.inboxId = Number($('inboxId').value || 0);
+        payload.daysLimitImportMessages = Number($('daysLimitImportMessages').value || 3);
+        payload.signDelimiter = ($('signDelimiter').value || '\\n').replace(/\\n/g, '\n');
+        payload.ignoreJids = $('ignoreJids').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean);
+        return payload;
+      }
+
+      async function save() {
+        if (!state.selected) return;
+        $('saveBtn').disabled = true;
+        $('saveBtn').textContent = 'Salvando…';
+        try {
+          await api('/set/' + encodeURIComponent(state.selected.id), { method: 'POST', body: JSON.stringify(formPayload()) });
+          toast('Configuração salva com sucesso.');
+          await selectInstance(state.selected);
+        } catch (error) { toast(error.message, true); }
+        finally { $('saveBtn').disabled = false; $('saveBtn').textContent = 'Salvar configuração'; }
+      }
+
+      $('loginForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        state.key = $('apiKey').value.trim();
+        $('loginBtn').disabled = true;
+        $('loginError').textContent = '';
+        try {
+          await loadInstances();
+          sessionStorage.setItem('connectorApiKey', state.key);
+          $('loginOverlay').classList.add('hidden');
+          $('apiKey').value = '';
+        } catch (error) { $('loginError').textContent = error.message; }
+        finally { $('loginBtn').disabled = false; }
+      });
+      $('saveBtn').addEventListener('click', save);
+      $('configForm').addEventListener('submit', event => { event.preventDefault(); save(); });
+      $('refreshBtn').addEventListener('click', () => loadInstances(false).then(() => toast('Instâncias atualizadas.')).catch(error => toast(error.message, true)));
+      $('copyBtn').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('webhookUrl').value); toast('URL copiada.'); } catch (_) { $('webhookUrl').select(); document.execCommand('copy'); toast('URL copiada.'); } });
+      $('logoutBtn').addEventListener('click', () => { sessionStorage.removeItem('connectorApiKey'); state.key = ''; $('loginOverlay').classList.remove('hidden'); $('apiKey').focus(); });
+
+      if (state.key) {
+        $('loginOverlay').classList.add('hidden');
+        loadInstances().catch(error => toast(error.message, true));
+      }
+    })();
+  </script>
+</body>
+</html>
