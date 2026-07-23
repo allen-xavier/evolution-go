@@ -21,6 +21,7 @@ func (fakeService) Find(string) (*model.ChatwootConfigView, error) {
 }
 func (fakeService) HandleWebhook(string, http.Header, []byte) error { return nil }
 func (fakeService) HandleEvolutionEvent([]byte) error               { return nil }
+func (fakeService) Run(context.Context)                             {}
 
 type fakeEvolution struct{}
 

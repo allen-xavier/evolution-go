@@ -25,8 +25,8 @@ O Docker Swarm não faz build durante `docker stack deploy`. Publique a imagem e
 um registry acessível pelos nós:
 
 ```bash
-docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.4.1 .
-docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.4.1
+docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.3 .
+docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.3
 ```
 
 ## Deploy
@@ -45,13 +45,26 @@ Se a imagem for entregue como arquivo em vez de registry, carregue-a no nó
 manager e impeça a resolução remota durante o deploy:
 
 ```bash
-docker load -i evolution-go-chatwoot-connector-0.4.1-linux-amd64.tar.gz
+docker load -i evolution-go-chatwoot-connector-0.5.3-linux-amd64.tar.gz
 docker stack deploy --resolve-image never -c docker-stack.swarm.yml evolution
 ```
 
 O banco atual pode ser mantido. Além de `chatwoot_configs` e
-`chatwoot_bindings`, o conector cria `chatwoot_proxy_tests` para registrar o
-último IP validado de cada instância.
+`chatwoot_bindings`, o conector cria automaticamente:
+
+- `chatwoot_identity_aliases`, que associa o LID provisório ao número real;
+- `chatwoot_outbound_jobs`, que mantém mensagens do Chatwoot aguardando nova
+  tentativa de envio ao WhatsApp;
+- `chatwoot_proxy_tests`, que registra o último IP validado de cada instância.
+
+Eventos recebidos do Evolution só recebem `ACK` depois de serem aceitos pelo
+Chatwoot. Uma falha passa por até oito tentativas persistentes com intervalo de
+15 segundos; depois o evento fica disponível nas filas RabbitMQ
+`message.chatwoot-dead` ou `sendmessage.chatwoot-dead`.
+
+Quando o envio Chatwoot → WhatsApp falha, o webhook é salvo no PostgreSQL e o
+conector tenta novamente com backoff de 15 segundos até 5 minutos. O ID
+determinístico da mensagem é mantido em todas as tentativas.
 
 ## Painel online
 

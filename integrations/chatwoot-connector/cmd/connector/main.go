@@ -54,7 +54,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
-	if err := db.AutoMigrate(&model.ChatwootConfig{}, &model.ChatwootBinding{}, &proxymanager.TestRecord{}); err != nil {
+	if err := db.AutoMigrate(
+		&model.ChatwootConfig{},
+		&model.ChatwootBinding{},
+		&model.ChatwootIdentityAlias{},
+		&model.ChatwootOutboundJob{},
+		&proxymanager.TestRecord{},
+	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	if err := migrateLegacyBindings(db); err != nil {
@@ -77,6 +83,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	go chatwootService.Run(ctx)
 	go proxyManager.RunMonitor(ctx, time.Duration(proxyMonitorSeconds)*time.Second, func(err error) {
 		logger.Error("proxy safety monitor failed", "error", err)
 	})

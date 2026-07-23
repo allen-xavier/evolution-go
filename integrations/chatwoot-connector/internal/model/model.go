@@ -47,6 +47,36 @@ type ChatwootBinding struct {
 	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
 }
 
+// ChatwootIdentityAlias keeps the WhatsApp LID-to-phone relationship learned
+// from later events. The first event for a contact may contain only a LID; once
+// WhatsApp includes SenderAlt/RecipientAlt, subsequent LID-only events can be
+// routed to the same Chatwoot conversation.
+type ChatwootIdentityAlias struct {
+	InstanceID   string `json:"instanceId" gorm:"type:uuid;primaryKey"`
+	AliasJID     string `json:"aliasJid" gorm:"column:alias_j_id;size:191;primaryKey"`
+	CanonicalJID string `json:"canonicalJid" gorm:"column:canonical_j_id;size:191;index:idx_chatwoot_identity_canonical"`
+
+	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime"`
+	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
+}
+
+// ChatwootOutboundJob is a durable copy of a Chatwoot webhook that Evolution
+// could not send to WhatsApp. Jobs are retried until delivery succeeds.
+type ChatwootOutboundJob struct {
+	ID uint `json:"id" gorm:"primaryKey"`
+
+	InstanceID        string `json:"instanceId" gorm:"type:uuid;uniqueIndex:idx_chatwoot_outbound_message"`
+	ChatwootMessageID string `json:"chatwootMessageId" gorm:"size:191;uniqueIndex:idx_chatwoot_outbound_message"`
+	Payload           []byte `json:"-" gorm:"type:bytea"`
+
+	Attempts      int       `json:"attempts" gorm:"default:0"`
+	NextAttemptAt time.Time `json:"nextAttemptAt" gorm:"index:idx_chatwoot_outbound_due"`
+	LastError     string    `json:"lastError" gorm:"type:text"`
+
+	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime"`
+	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
+}
+
 type SetChatwootPayload struct {
 	Enabled bool `json:"enabled"`
 

@@ -43,6 +43,24 @@ padrão e não pausa sessões ativas. A pausa terminal até a validação de um 
 estável e exclusivo só é usada quando o modo opcional
 `PROXY_COLLISION_ACTION=quarantine` está habilitado.
 
+O terceiro patch melhora o diagnóstico de webhooks externos. Respostas HTTP não
+2xx passam a registrar o evento, status, tamanho do payload e até 2 KiB do corpo
+de resposta, e cada tentativa tem timeout de 30 segundos. Isso permite enxergar
+o motivo exato de respostas como `400 Bad Request` devolvidas pelo n8n.
+
+O quarto patch adiciona a tabela `evolution_amqp_outbox`. Todo evento destinado
+ao RabbitMQ é gravado no PostgreSQL antes de ser aceito pelo Evolution e só é
+removido depois da confirmação do broker. Falhas mantêm o evento pendente com
+backoff de 5 segundos a 5 minutos, inclusive após reinício do container. Com
+`AMQP_GLOBAL_ENABLED=true`, a inicialização das sessões do WhatsApp também fica
+pausada até o RabbitMQ estar realmente disponível.
+
+As stacks separadas e o procedimento de migração estão em
+`integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
+`docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
+RabbitMQ ficam fora das atualizações rotineiras da aplicação e suas imagens são
+fixadas por digest.
+
 ## Atualização futura
 
 Depois de colocar uma release nova no repositório, execute primeiro o teste. Se

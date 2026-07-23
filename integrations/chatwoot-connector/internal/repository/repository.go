@@ -8,6 +8,12 @@ import (
 
 	chatwoot_model "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+const (
+	identityAliasJIDColumn     = "alias_j_id"
+	identityCanonicalJIDColumn = "canonical_j_id"
 )
 
 type ChatwootRepository interface {
@@ -15,8 +21,17 @@ type ChatwootRepository interface {
 	GetConfig(instanceID string) (*chatwoot_model.ChatwootConfig, error)
 
 	SaveBinding(binding *chatwoot_model.ChatwootBinding) error
+	DeleteBinding(binding *chatwoot_model.ChatwootBinding) error
 	GetBindingByRemoteJID(instanceID string, remoteJID string) (*chatwoot_model.ChatwootBinding, error)
 	GetBindingByConversationID(instanceID string, conversationID int) (*chatwoot_model.ChatwootBinding, error)
+
+	SaveIdentityAlias(instanceID string, aliasJID string, canonicalJID string) error
+	ResolveIdentityAlias(instanceID string, aliasJID string) (string, error)
+
+	EnqueueOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
+	ListDueOutboundJobs(now time.Time, limit int) ([]chatwoot_model.ChatwootOutboundJob, error)
+	SaveOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
+	DeleteOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
 }
 
 type chatwootRepository struct {
@@ -83,6 +98,13 @@ func (r *chatwootRepository) SaveBinding(binding *chatwoot_model.ChatwootBinding
 	return nil
 }
 
+func (r *chatwootRepository) DeleteBinding(binding *chatwoot_model.ChatwootBinding) error {
+	if binding == nil || binding.ID == 0 {
+		return nil
+	}
+	return r.db.Delete(binding).Error
+}
+
 func (r *chatwootRepository) GetBindingByRemoteJID(instanceID string, remoteJID string) (*chatwoot_model.ChatwootBinding, error) {
 	columns := r.remoteJIDLookupColumns()
 	var lastErr error
@@ -133,6 +155,90 @@ func (r *chatwootRepository) GetBindingByConversationID(instanceID string, conve
 		return nil, lastErr
 	}
 	return nil, nil
+}
+
+func (r *chatwootRepository) SaveIdentityAlias(instanceID string, aliasJID string, canonicalJID string) error {
+	alias := chatwoot_model.ChatwootIdentityAlias{
+		InstanceID:   strings.TrimSpace(instanceID),
+		AliasJID:     strings.TrimSpace(aliasJID),
+		CanonicalJID: strings.TrimSpace(canonicalJID),
+	}
+	if alias.InstanceID == "" || alias.AliasJID == "" || alias.CanonicalJID == "" {
+		return errors.New("identity alias requires instance, alias jid and canonical jid")
+	}
+
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "instance_id"},
+			{Name: identityAliasJIDColumn},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{identityCanonicalJIDColumn, "updated_at"}),
+	}).Create(&alias).Error
+}
+
+func (r *chatwootRepository) ResolveIdentityAlias(instanceID string, aliasJID string) (string, error) {
+	var alias chatwoot_model.ChatwootIdentityAlias
+	err := r.db.Where("instance_id = ? AND "+identityAliasJIDColumn+" = ?", strings.TrimSpace(instanceID), strings.TrimSpace(aliasJID)).
+		First(&alias).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(alias.CanonicalJID), nil
+}
+
+func (r *chatwootRepository) EnqueueOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error {
+	if job == nil {
+		return errors.New("outbound job is required")
+	}
+	if strings.TrimSpace(job.InstanceID) == "" || strings.TrimSpace(job.ChatwootMessageID) == "" {
+		return errors.New("outbound job requires instance and Chatwoot message ID")
+	}
+	if job.NextAttemptAt.IsZero() {
+		job.NextAttemptAt = time.Now()
+	}
+
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "instance_id"},
+			{Name: "chatwoot_message_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"payload":         job.Payload,
+			"next_attempt_at": job.NextAttemptAt,
+			"last_error":      job.LastError,
+			"updated_at":      time.Now(),
+		}),
+	}).Create(job).Error
+}
+
+func (r *chatwootRepository) ListDueOutboundJobs(now time.Time, limit int) ([]chatwoot_model.ChatwootOutboundJob, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var jobs []chatwoot_model.ChatwootOutboundJob
+	err := r.db.
+		Where("next_attempt_at <= ?", now).
+		Order("next_attempt_at ASC, id ASC").
+		Limit(limit).
+		Find(&jobs).Error
+	return jobs, err
+}
+
+func (r *chatwootRepository) SaveOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error {
+	if job == nil {
+		return errors.New("outbound job is required")
+	}
+	return r.db.Save(job).Error
+}
+
+func (r *chatwootRepository) DeleteOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error {
+	if job == nil || job.ID == 0 {
+		return nil
+	}
+	return r.db.Delete(job).Error
 }
 
 func NewChatwootRepository(db *gorm.DB) ChatwootRepository {

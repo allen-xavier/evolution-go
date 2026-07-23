@@ -1,5 +1,8 @@
 version: "3.8"
 
+# Application-only stack. PostgreSQL and RabbitMQ are intentionally absent.
+# Deploy docker-stack.infrastructure.swarm.yml once and keep it independent.
+
 services:
   evolution_go:
     image: "${EVOLUTION_IMAGE}"
@@ -39,7 +42,6 @@ services:
       - evolution_instances_shared:/app/dbdata
       - evolution_go_logs:/app/logs
     deploy:
-      mode: replicated
       replicas: 1
       placement:
         constraints:
@@ -47,6 +49,9 @@ services:
       restart_policy:
         condition: on-failure
         delay: 5s
+      update_config:
+        parallelism: 1
+        order: stop-first
       resources:
         limits:
           cpus: "1.0"
@@ -70,7 +75,7 @@ services:
         - traefik.http.services.evolution-go.loadbalancer.passHostHeader=true
 
   chatwoot_connector:
-    image: ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.3
+    image: "${CONNECTOR_IMAGE}"
     networks:
       - minha_rede
     environment:
@@ -84,7 +89,6 @@ services:
       PROXY_MONITOR_INTERVAL_SECONDS: "60"
       PROXY_COLLISION_ACTION: "alert"
     deploy:
-      mode: replicated
       replicas: 1
       placement:
         constraints:
@@ -92,6 +96,9 @@ services:
       restart_policy:
         condition: on-failure
         delay: 5s
+      update_config:
+        parallelism: 1
+        order: stop-first
       resources:
         limits:
           cpus: "0.50"
@@ -109,59 +116,6 @@ services:
         - traefik.http.routers.chatwoot-connector.middlewares=evolution-security
         - traefik.http.services.chatwoot-connector.loadbalancer.server.port=4100
 
-  evolution_postgres:
-    image: postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
-    hostname: evolution_postgres
-    networks:
-      - minha_rede
-    environment:
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-      POSTGRES_DB: "evolution_go"
-    volumes:
-      - evolution_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d evolution_go"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    deploy:
-      placement:
-        constraints:
-          - node.role == manager
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 1024M
-
-  evolution_rabbitmq:
-    image: rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc
-    hostname: evolution_rabbitmq
-    networks:
-      - minha_rede
-    environment:
-      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER}"
-      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD}"
-    volumes:
-      - evolution_rabbitmq_data:/var/lib/rabbitmq
-    deploy:
-      placement:
-        constraints:
-          - node.role == manager
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 512M
-        reservations:
-          memory: 128M
-
 volumes:
   evolution_instances_shared:
     external: true
@@ -169,12 +123,6 @@ volumes:
   evolution_go_logs:
     external: true
     name: evolution_go_logs
-  evolution_postgres_data:
-    external: true
-    name: evolution_postgres_data
-  evolution_rabbitmq_data:
-    external: true
-    name: evolution_rabbitmq_data
 
 networks:
   minha_rede:

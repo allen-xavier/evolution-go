@@ -1,0 +1,108 @@
+diff --git a/pkg/events/webhook/webhook_producer.go b/pkg/events/webhook/webhook_producer.go
+index 433fa3b..3e53533 100644
+--- a/pkg/events/webhook/webhook_producer.go
++++ b/pkg/events/webhook/webhook_producer.go
+@@ -2,7 +2,6 @@ package webhook_producer
+ 
+ import (
+ 	"bytes"
+-	"errors"
+ 	"fmt"
+ 	"io"
+ 	"net/http"
+@@ -41,27 +40,47 @@ func (p *webhookProducer) Produce(
+ 	}
+ 
+ 	if p.url != "" {
+-		go p.sendWebhookWithRetry(p.url, payload, 5, 30*time.Second, userID)
++		go p.sendWebhookWithRetry(p.url, payload, 5, 30*time.Second, userID, splitQueue[1])
+ 	}
+ 	if webhookUrl != "" {
+-		go p.sendWebhookWithRetry(webhookUrl, payload, 5, 30*time.Second, userID)
++		go p.sendWebhookWithRetry(webhookUrl, payload, 5, 30*time.Second, userID, splitQueue[1])
+ 	}
+ 
+ 	return nil
+ }
+ 
+-func (p *webhookProducer) sendWebhookWithRetry(url string, body []byte, maxRetries int, retryInterval time.Duration, userID string) {
++func (p *webhookProducer) sendWebhookWithRetry(url string, body []byte, maxRetries int, retryInterval time.Duration, userID string, event string) {
+ 	for i := 0; i < maxRetries; i++ {
+ 		err, responseBody, statusCode := p.sendWebhook(url, body, userID)
+ 		if err == nil {
+-			p.loggerWrapper.GetLogger(userID).LogInfo("[%s] webhook sent successfully - url: %s, status: %d, response: %s", userID, url, statusCode, string(responseBody))
++			p.loggerWrapper.GetLogger(userID).LogInfo(
++				"[%s] webhook sent successfully - event: %s, url: %s, status: %d, response: %q",
++				userID,
++				event,
++				url,
++				statusCode,
++				webhookResponseForLog(responseBody),
++			)
+ 			return
+ 		}
+-		p.loggerWrapper.GetLogger(userID).LogWarn("[%s] webhook failed - url: %s, attempt: %d, error: %v", userID, url, i+1, err)
+-
+-		time.Sleep(retryInterval)
++		p.loggerWrapper.GetLogger(userID).LogWarn(
++			"[%s] webhook failed - event: %s, url: %s, attempt: %d/%d, status: %d, response: %q, payload_bytes: %d, error: %v",
++			userID,
++			event,
++			url,
++			i+1,
++			maxRetries,
++			statusCode,
++			webhookResponseForLog(responseBody),
++			len(body),
++			err,
++		)
++
++		if i+1 < maxRetries {
++			time.Sleep(retryInterval)
++		}
+ 	}
+-	p.loggerWrapper.GetLogger(userID).LogError("[%s] webhook failed after maximum retries - url: %s", userID, url)
++	p.loggerWrapper.GetLogger(userID).LogError("[%s] webhook failed after maximum retries - event: %s, url: %s", userID, event, url)
+ }
+ 
+ func (p *webhookProducer) sendWebhook(url string, body []byte, userID string) (error, []byte, int) {
+@@ -72,25 +91,36 @@ func (p *webhookProducer) sendWebhook(url string, body []byte, userID string) (e
+ 
+ 	req.Header.Set("Content-Type", "application/json")
+ 
+-	client := &http.Client{}
++	client := &http.Client{Timeout: 30 * time.Second}
+ 	resp, err := client.Do(req)
+ 	if err != nil {
+ 		return err, nil, 0
+ 	}
+ 	defer resp.Body.Close()
+ 
+-	responseBody, err := io.ReadAll(resp.Body)
++	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+ 	if err != nil {
+ 		return fmt.Errorf("erro ao ler resposta: %v", err), nil, 0
+ 	}
+ 
+ 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+-		return errors.New("received non-2xx response: " + resp.Status), responseBody, resp.StatusCode
++		return fmt.Errorf("received non-2xx response: %s", resp.Status), responseBody, resp.StatusCode
+ 	}
+ 
+ 	return nil, responseBody, resp.StatusCode
+ }
+ 
++func webhookResponseForLog(body []byte) string {
++	const maxLogBytes = 2048
++
++	response := strings.TrimSpace(string(body))
++	response = strings.Join(strings.Fields(response), " ")
++	if len(response) <= maxLogBytes {
++		return response
++	}
++	return response[:maxLogBytes] + "...(truncated)"
++}
++
+ // CreateGlobalQueues não faz nada para webhook producer
+ func (p *webhookProducer) CreateGlobalQueues() error {
+ 	return nil

@@ -19,6 +19,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	evolution "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/evolution"
@@ -33,7 +34,15 @@ type ChatwootService interface {
 	Find(instanceID string) (*chatwoot_model.ChatwootConfigView, error)
 	HandleWebhook(instanceID string, headers http.Header, body []byte) error
 	HandleEvolutionEvent(payload []byte) error
+	Run(ctx context.Context)
 }
+
+const (
+	outboundWorkerInterval    = 5 * time.Second
+	outboundInitialRetryDelay = 15 * time.Second
+	outboundMaximumRetryDelay = 5 * time.Minute
+	outboundWorkerBatchSize   = 20
+)
 
 type chatwootService struct {
 	repository      chatwoot_repository.ChatwootRepository
@@ -42,7 +51,8 @@ type chatwootService struct {
 	httpClient      *http.Client
 	skipCache       *cache.Cache
 	webhookCache    *cache.Cache
-	eventQueue      chan chatwootEvent
+	evolutionCache  *cache.Cache
+	identityLocks   [256]sync.Mutex
 	loggerWrapper   *logger_wrapper.Manager
 }
 
@@ -141,6 +151,8 @@ type evolutionMessage struct {
 	MessageID       string
 	MessageSourceID string
 	FromMe          bool
+	Unavailable     bool
+	IdentityAliases []string
 }
 
 type mediaAttachment struct {
@@ -308,16 +320,44 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		return nil
 	}
 
+	if err := s.deliverChatwootPayload(instanceID, cfg, payload); err != nil {
+		job := &chatwoot_model.ChatwootOutboundJob{
+			InstanceID:        instanceID,
+			ChatwootMessageID: chatwootMessageID,
+			Payload:           append([]byte(nil), body...),
+			NextAttemptAt:     time.Now().Add(outboundInitialRetryDelay),
+			LastError:         truncateText(err.Error(), 4000),
+		}
+		if queueErr := s.repository.EnqueueOutboundJob(job); queueErr != nil {
+			s.webhookCache.Delete(webhookKey)
+			return fmt.Errorf("deliver Chatwoot message %s: %v (persist retry job: %w)", chatwootMessageID, err, queueErr)
+		}
+		s.loggerWrapper.GetLogger(instanceID).LogWarn(
+			"[%s] Chatwoot message %s persisted for retry after delivery failure: %v",
+			instanceID,
+			chatwootMessageID,
+			err,
+		)
+		return nil
+	}
+
+	return nil
+}
+
+func (s *chatwootService) deliverChatwootPayload(
+	instanceID string,
+	cfg *chatwoot_model.ChatwootConfig,
+	payload chatwootWebhookPayload,
+) error {
+	chatwootMessageID := webhookMessageID(payload.ID)
 	instance, err := s.evolutionClient.GetInstance(context.Background(), instanceID)
 	if err != nil {
-		s.webhookCache.Delete(webhookKey)
 		return err
 	}
 
 	remoteJID := ""
 	binding, err := s.repository.GetBindingByConversationID(instanceID, payload.Conversation.ID)
 	if err != nil {
-		s.webhookCache.Delete(webhookKey)
 		return err
 	}
 	if binding != nil {
@@ -326,16 +366,24 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	if remoteJID == "" {
 		remoteJID = remoteJIDFromSourceID(instanceID, payload.Conversation.ContactInbox.SourceID)
 	}
+	if isLIDRemoteJID(remoteJID) {
+		canonicalJID, resolveErr := s.repository.ResolveIdentityAlias(instanceID, remoteJID)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve WhatsApp LID %s: %w", remoteJID, resolveErr)
+		}
+		if isPhoneRemoteJID(canonicalJID) {
+			remoteJID = canonicalJID
+		}
+	}
 	if remoteJID == "" {
-		s.webhookCache.Delete(webhookKey)
 		return fmt.Errorf("unable to resolve remote jid for conversation %d", payload.Conversation.ID)
 	}
-	s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Chatwoot webhook resolved recipient: remote=%s", instanceID, remoteJID)
+	s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Chatwoot webhook resolved recipient: remote=%s message=%s", instanceID, remoteJID, chatwootMessageID)
 
 	var sendErrors []string
 	hasAttachment := false
-	for _, a := range payload.Attachments {
-		if strings.TrimSpace(a.DataURL) != "" {
+	for _, attachment := range payload.Attachments {
+		if strings.TrimSpace(attachment.DataURL) != "" {
 			hasAttachment = true
 			break
 		}
@@ -344,14 +392,14 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	content := applyChatwootSignature(cfg, payload.Content, payload.Sender.Name)
 	if strings.TrimSpace(content) != "" && !hasAttachment {
 		if err := s.sendTextFromChatwoot(instance, remoteJID, content, chatwootMessageID); err != nil {
-			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send text from Chatwoot to WhatsApp: %v", instanceID, err)
+			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send Chatwoot text message %s to WhatsApp: %v", instanceID, chatwootMessageID, err)
 			sendErrors = append(sendErrors, fmt.Sprintf("text:%v", err))
 		}
 	}
 
 	attachmentIndex := 0
-	for _, a := range payload.Attachments {
-		if a.DataURL == "" {
+	for _, attachment := range payload.Attachments {
+		if attachment.DataURL == "" {
 			continue
 		}
 		caption := ""
@@ -359,18 +407,143 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 			caption = content
 		}
 		attachmentIndex++
-		if err := s.sendMediaFromChatwoot(instance, remoteJID, a.DataURL, a.FileType, a.FileName, caption, chatwootMessageID); err != nil {
-			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send media from Chatwoot to WhatsApp: %v", instanceID, err)
+		if err := s.sendMediaFromChatwoot(
+			instance,
+			remoteJID,
+			attachment.DataURL,
+			attachment.FileType,
+			attachment.FileName,
+			caption,
+			chatwootMessageID,
+		); err != nil {
+			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send Chatwoot media message %s to WhatsApp: %v", instanceID, chatwootMessageID, err)
 			sendErrors = append(sendErrors, fmt.Sprintf("media:%v", err))
 		}
 	}
 
 	if len(sendErrors) > 0 {
-		s.webhookCache.Delete(webhookKey)
 		return fmt.Errorf("failed to deliver chatwoot message %s: %s", chatwootMessageID, strings.Join(sendErrors, " | "))
 	}
 
 	return nil
+}
+
+func (s *chatwootService) Run(ctx context.Context) {
+	s.processDueOutboundJobs(ctx)
+	ticker := time.NewTicker(outboundWorkerInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.processDueOutboundJobs(ctx)
+		}
+	}
+}
+
+func (s *chatwootService) processDueOutboundJobs(ctx context.Context) {
+	jobs, err := s.repository.ListDueOutboundJobs(time.Now(), outboundWorkerBatchSize)
+	if err != nil {
+		s.loggerWrapper.GetLogger("outbound-worker").LogError("Failed to load durable Chatwoot outbound jobs: %v", err)
+		return
+	}
+
+	for index := range jobs {
+		if ctx.Err() != nil {
+			return
+		}
+		s.processOutboundJob(&jobs[index])
+	}
+}
+
+func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboundJob) {
+	if job == nil {
+		return
+	}
+
+	var payload chatwootWebhookPayload
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		s.rescheduleOutboundJob(job, fmt.Errorf("invalid stored Chatwoot webhook: %w", err))
+		return
+	}
+
+	cfg, err := s.repository.GetConfig(job.InstanceID)
+	if err != nil {
+		s.rescheduleOutboundJob(job, fmt.Errorf("load Chatwoot config: %w", err))
+		return
+	}
+	if cfg == nil || !cfg.Enabled {
+		s.rescheduleOutboundJob(job, errors.New("Chatwoot integration is disabled"))
+		return
+	}
+
+	if err := s.deliverChatwootPayload(job.InstanceID, cfg, payload); err != nil {
+		s.rescheduleOutboundJob(job, err)
+		return
+	}
+
+	if err := s.repository.DeleteOutboundJob(job); err != nil {
+		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
+			"[%s] Chatwoot message %s reached WhatsApp, but its retry job could not be removed: %v",
+			job.InstanceID,
+			job.ChatwootMessageID,
+			err,
+		)
+		return
+	}
+	s.loggerWrapper.GetLogger(job.InstanceID).LogInfo(
+		"[%s] Durable Chatwoot message %s delivered to WhatsApp after %d retries",
+		job.InstanceID,
+		job.ChatwootMessageID,
+		job.Attempts+1,
+	)
+}
+
+func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) {
+	job.Attempts++
+	job.LastError = truncateText(deliveryErr.Error(), 4000)
+	job.NextAttemptAt = time.Now().Add(outboundRetryDelay(job.Attempts))
+	if err := s.repository.SaveOutboundJob(job); err != nil {
+		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
+			"[%s] Failed to reschedule durable Chatwoot message %s: delivery_error=%v persistence_error=%v",
+			job.InstanceID,
+			job.ChatwootMessageID,
+			deliveryErr,
+			err,
+		)
+		return
+	}
+	s.loggerWrapper.GetLogger(job.InstanceID).LogWarn(
+		"[%s] Durable Chatwoot message %s retry %d failed; next attempt at %s: %v",
+		job.InstanceID,
+		job.ChatwootMessageID,
+		job.Attempts,
+		job.NextAttemptAt.Format(time.RFC3339),
+		deliveryErr,
+	)
+}
+
+func outboundRetryDelay(attempt int) time.Duration {
+	if attempt <= 1 {
+		return outboundInitialRetryDelay
+	}
+	delay := outboundInitialRetryDelay
+	for current := 1; current < attempt; current++ {
+		delay *= 2
+		if delay >= outboundMaximumRetryDelay {
+			return outboundMaximumRetryDelay
+		}
+	}
+	return delay
+}
+
+func truncateText(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max]
 }
 
 func (s *chatwootService) HandleEvolutionEvent(raw []byte) error {
@@ -389,67 +562,79 @@ func (s *chatwootService) HandleEvolutionEvent(raw []byte) error {
 		instance: &evolution.Instance{Id: payload.InstanceID, Name: payload.InstanceName},
 		payload:  append([]byte(nil), raw...),
 	}
-
-	select {
-	case s.eventQueue <- event:
-	default:
-		return fmt.Errorf("chatwoot event queue is full")
-	}
-	return nil
+	return s.syncEvolutionEventToChatwoot(event)
 }
 
-func (s *chatwootService) runEventWorker() {
-	for evt := range s.eventQueue {
-		s.syncEvolutionEventToChatwoot(evt)
-	}
-}
-
-func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
+func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) error {
 	instance := evt.instance
 	if instance == nil {
-		return
+		return nil
 	}
 
 	cfg, err := s.repository.GetConfig(instance.Id)
 	if err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to load Chatwoot config: %v", instance.Id, err)
-		return
+		return fmt.Errorf("load Chatwoot config for %s: %w", instance.Id, err)
 	}
 	if cfg == nil || !cfg.Enabled {
-		return
+		return nil
 	}
 
 	var payload evolutionWebhookPayload
 	if err := json.Unmarshal(evt.payload, &payload); err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to parse Evolution event for Chatwoot: %v", instance.Id, err)
-		return
+		return fmt.Errorf("parse Evolution event for %s: %w", instance.Id, err)
 	}
 	if payload.InstanceID == "" {
 		payload.InstanceID = instance.Id
 	}
 	if payload.Event != "Message" && payload.Event != "SendMessage" {
-		return
+		return nil
 	}
 
 	message, ok := s.extractEvolutionMessage(payload, evt.payload)
 	if !ok {
-		return
+		return nil
 	}
 
 	if message.RemoteJID == "" {
-		return
+		return nil
 	}
 	if strings.HasSuffix(message.RemoteJID, "@g.us") ||
 		strings.HasSuffix(message.RemoteJID, "@newsletter") ||
 		strings.Contains(message.RemoteJID, "@broadcast") {
-		return
+		return nil
 	}
 
+	if err := s.canonicalizeMessageIdentity(instance.Id, &message); err != nil {
+		return fmt.Errorf("canonicalize WhatsApp identity for %s: %w", instance.Id, err)
+	}
+	if message.Unavailable {
+		return fmt.Errorf(
+			"WhatsApp message %s from %s is unavailable or could not be decrypted",
+			message.MessageID,
+			message.RemoteJID,
+		)
+	}
+	unlockIdentity := s.lockMessageIdentity(instance.Id, message)
+	defer unlockIdentity()
+
 	if message.FromMe && s.shouldSkipOutgoingSync(instance.Id, message.MessageID) {
-		return
+		return nil
 	}
 	if shouldIgnoreJID(cfg.IgnoreJids, message.RemoteJID) {
-		return
+		return nil
+	}
+
+	eventKey := fmt.Sprintf("%s:%s", instance.Id, message.MessageSourceID)
+	if err := s.evolutionCache.Add(eventKey, true, 24*time.Hour); err != nil {
+		s.loggerWrapper.GetLogger(instance.Id).LogInfo(
+			"[%s] Skipping duplicated Evolution message: id=%s remote=%s",
+			instance.Id,
+			message.MessageID,
+			message.RemoteJID,
+		)
+		return nil
 	}
 
 	messageType := "incoming"
@@ -465,14 +650,37 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 	if !hasMedia {
 		message.Media = mediaAttachment{}
 		if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType); err != nil {
+			s.evolutionCache.Delete(eventKey)
 			s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync message to Chatwoot: %v", instance.Id, err)
+			return fmt.Errorf("sync WhatsApp message %s to Chatwoot: %w", message.MessageID, err)
 		}
-		return
+		s.logEvolutionSyncSuccess(instance.Id, message, messageType)
+		return nil
 	}
 
 	if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType); err != nil {
+		s.evolutionCache.Delete(eventKey)
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync media message to Chatwoot: %v", instance.Id, err)
+		return fmt.Errorf("sync WhatsApp media message %s to Chatwoot: %w", message.MessageID, err)
 	}
+	s.logEvolutionSyncSuccess(instance.Id, message, messageType)
+	return nil
+}
+
+func (s *chatwootService) lockMessageIdentity(instanceID string, message evolutionMessage) func() {
+	identityJID := normalizeRemoteJID(message.RemoteJID)
+	if aliases := uniqueLIDJIDs(message.IdentityAliases); len(aliases) > 0 {
+		identityJID = aliases[0]
+	}
+	key := strings.TrimSpace(instanceID) + "|" + identityJID
+	var hash uint32 = 2166136261
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= 16777619
+	}
+	mutex := &s.identityLocks[hash%uint32(len(s.identityLocks))]
+	mutex.Lock()
+	return mutex.Unlock
 }
 
 func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
@@ -481,7 +689,7 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 	message evolutionMessage,
 	messageType string,
 ) error {
-	binding, err := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName, false)
+	binding, err := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.IdentityAliases, message.ContactName, false)
 	if err != nil {
 		return fmt.Errorf("failed to resolve Chatwoot binding: %v", err)
 	}
@@ -493,7 +701,7 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 
 	s.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Chatwoot binding not found remotely; recreating contact/conversation for %s", instance.Id, message.RemoteJID)
 
-	binding, refreshErr := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName, true)
+	binding, refreshErr := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.IdentityAliases, message.ContactName, true)
 	if refreshErr != nil {
 		return fmt.Errorf("%v (failed to refresh Chatwoot binding: %v)", err, refreshErr)
 	}
@@ -501,7 +709,14 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 	return s.sendMessageToChatwoot(cfg, binding, message, messageType)
 }
 
-func (s *chatwootService) getOrCreateBindingByRemote(instance *evolution.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string, forceRefresh bool) (*chatwoot_model.ChatwootBinding, error) {
+func (s *chatwootService) getOrCreateBindingByRemote(
+	instance *evolution.Instance,
+	cfg *chatwoot_model.ChatwootConfig,
+	remoteJID string,
+	identityAliases []string,
+	contactName string,
+	forceRefresh bool,
+) (*chatwoot_model.ChatwootBinding, error) {
 	remoteJID = normalizeRemoteJID(remoteJID)
 	contactRef := buildChatwootContactRef(instance.Id, remoteJID, contactName, cfg.MergeBrazilContacts)
 
@@ -509,8 +724,34 @@ func (s *chatwootService) getOrCreateBindingByRemote(instance *evolution.Instanc
 	if err != nil {
 		return nil, err
 	}
-	if !forceRefresh && binding != nil && strings.EqualFold(strings.TrimSpace(binding.SourceID), contactRef.SourceID) {
+	if !forceRefresh && binding != nil {
+		if err := s.removeDuplicateAliasBindings(instance.Id, binding, identityAliases); err != nil {
+			return nil, err
+		}
 		return binding, nil
+	}
+
+	if !forceRefresh && binding == nil && isPhoneRemoteJID(remoteJID) {
+		provisional, migrateErr := s.findAliasBinding(instance.Id, identityAliases)
+		if migrateErr != nil {
+			return nil, migrateErr
+		}
+		if provisional != nil {
+			previousJID := provisional.RemoteJID
+			provisional.RemoteJID = remoteJID
+			if err := s.repository.SaveBinding(provisional); err != nil {
+				return nil, fmt.Errorf("migrate provisional LID binding: %w", err)
+			}
+			s.loggerWrapper.GetLogger(instance.Id).LogInfo(
+				"[%s] Migrated Chatwoot conversation %d from WhatsApp LID %s to %s",
+				instance.Id,
+				provisional.ConversationID,
+				previousJID,
+				remoteJID,
+			)
+			s.updateMigratedChatwootContact(cfg, provisional, contactRef)
+			return provisional, nil
+		}
 	}
 
 	contactID, err := s.createChatwootContact(cfg, contactRef)
@@ -546,6 +787,154 @@ func (s *chatwootService) getOrCreateBindingByRemote(instance *evolution.Instanc
 	}
 
 	return binding, nil
+}
+
+func (s *chatwootService) canonicalizeMessageIdentity(instanceID string, message *evolutionMessage) error {
+	if message == nil {
+		return nil
+	}
+
+	message.RemoteJID = normalizeRemoteJID(message.RemoteJID)
+	message.IdentityAliases = uniqueLIDJIDs(message.IdentityAliases)
+
+	if isPhoneRemoteJID(message.RemoteJID) {
+		for _, aliasJID := range message.IdentityAliases {
+			if err := s.repository.SaveIdentityAlias(instanceID, aliasJID, message.RemoteJID); err != nil {
+				return fmt.Errorf("save alias %s -> %s: %w", aliasJID, message.RemoteJID, err)
+			}
+		}
+		return nil
+	}
+
+	if !isLIDRemoteJID(message.RemoteJID) {
+		return nil
+	}
+
+	canonicalJID, err := s.repository.ResolveIdentityAlias(instanceID, message.RemoteJID)
+	if err != nil {
+		return err
+	}
+	if isPhoneRemoteJID(canonicalJID) {
+		if !containsJID(message.IdentityAliases, message.RemoteJID) {
+			message.IdentityAliases = append(message.IdentityAliases, message.RemoteJID)
+		}
+		message.RemoteJID = normalizeRemoteJID(canonicalJID)
+	}
+	return nil
+}
+
+func (s *chatwootService) findAliasBinding(instanceID string, identityAliases []string) (*chatwoot_model.ChatwootBinding, error) {
+	for _, aliasJID := range uniqueLIDJIDs(identityAliases) {
+		binding, err := s.repository.GetBindingByRemoteJID(instanceID, aliasJID)
+		if err != nil {
+			return nil, err
+		}
+		if binding != nil {
+			return binding, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *chatwootService) removeDuplicateAliasBindings(
+	instanceID string,
+	canonicalBinding *chatwoot_model.ChatwootBinding,
+	identityAliases []string,
+) error {
+	if canonicalBinding == nil {
+		return nil
+	}
+	for _, aliasJID := range uniqueLIDJIDs(identityAliases) {
+		aliasBinding, err := s.repository.GetBindingByRemoteJID(instanceID, aliasJID)
+		if err != nil {
+			return err
+		}
+		if aliasBinding == nil || aliasBinding.ID == canonicalBinding.ID {
+			continue
+		}
+		if err := s.repository.DeleteBinding(aliasBinding); err != nil {
+			return fmt.Errorf("remove duplicate LID binding %s: %w", aliasJID, err)
+		}
+		s.loggerWrapper.GetLogger(instanceID).LogWarn(
+			"[%s] Removed duplicate LID binding for conversation %d; canonical conversation is %d (%s)",
+			instanceID,
+			aliasBinding.ConversationID,
+			canonicalBinding.ConversationID,
+			canonicalBinding.RemoteJID,
+		)
+	}
+	return nil
+}
+
+func (s *chatwootService) updateMigratedChatwootContact(
+	cfg *chatwoot_model.ChatwootConfig,
+	binding *chatwoot_model.ChatwootBinding,
+	contactRef chatwootContactRef,
+) {
+	if cfg == nil || binding == nil || binding.ContactID <= 0 {
+		return
+	}
+
+	body := map[string]interface{}{}
+	if strings.TrimSpace(contactRef.Phone) != "" {
+		body["phone_number"] = contactRef.Phone
+	}
+	if name := strings.TrimSpace(contactRef.Name); name != "" && !isLIDRemoteJID(name) {
+		body["name"] = name
+	}
+	if len(body) == 0 {
+		return
+	}
+
+	route := fmt.Sprintf("/api/v1/accounts/%s/contacts/%d", cfg.AccountID, binding.ContactID)
+	if _, err := s.chatwootRequestJSON(http.MethodPut, cfg, route, body); err != nil {
+		s.loggerWrapper.GetLogger(binding.InstanceID).LogWarn(
+			"[%s] Conversation %d was migrated from LID, but Chatwoot contact %d could not be updated: %v",
+			binding.InstanceID,
+			binding.ConversationID,
+			binding.ContactID,
+			err,
+		)
+	}
+}
+
+func (s *chatwootService) logEvolutionSyncSuccess(instanceID string, message evolutionMessage, messageType string) {
+	s.loggerWrapper.GetLogger(instanceID).LogInfo(
+		"[%s] WhatsApp message synced to Chatwoot: id=%s remote=%s direction=%s media=%t",
+		instanceID,
+		message.MessageID,
+		message.RemoteJID,
+		messageType,
+		len(message.Media.Data) > 0,
+	)
+}
+
+func uniqueLIDJIDs(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = normalizeRemoteJID(value)
+		if !isLIDRemoteJID(value) {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func containsJID(values []string, expected string) bool {
+	expected = strings.ToLower(normalizeRemoteJID(expected))
+	for _, value := range values {
+		if strings.ToLower(normalizeRemoteJID(value)) == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConfig, contactRef chatwootContactRef) (int, error) {
@@ -1159,7 +1548,49 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 		MessageID:       messageID,
 		MessageSourceID: sourcePrefix + messageID,
 		FromMe:          fromMe,
+		Unavailable:     mapBool(data, "IsUnavailable", "isUnavailable") || mapBool(info, "IsUnavailable", "isUnavailable"),
+		IdentityAliases: evolutionIdentityAliases(data, info, fromMe),
 	}, true
+}
+
+func evolutionIdentityAliases(data map[string]interface{}, info map[string]interface{}, fromMe bool) []string {
+	candidates := []string{
+		mapString(info, "Chat", "chat", "RemoteJID", "remoteJid"),
+		mapString(data, "remoteJid", "remoteJID", "jid"),
+	}
+	if fromMe {
+		candidates = append(
+			candidates,
+			mapString(info, "Recipient", "recipient"),
+			mapString(info, "RecipientAlt", "recipientAlt"),
+			mapString(data, "Recipient", "recipient"),
+			mapString(data, "RecipientAlt", "recipientAlt"),
+		)
+	} else {
+		candidates = append(
+			candidates,
+			mapString(info, "Sender", "sender"),
+			mapString(info, "SenderAlt", "senderAlt"),
+			mapString(data, "Sender", "sender"),
+			mapString(data, "SenderAlt", "senderAlt"),
+		)
+	}
+
+	aliases := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = normalizeRemoteJID(candidate)
+		if !isLIDRemoteJID(candidate) {
+			continue
+		}
+		key := strings.ToLower(candidate)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliases = append(aliases, candidate)
+	}
+	return aliases
 }
 
 func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface{}) (string, mediaAttachment) {
@@ -1218,14 +1649,27 @@ func (s *chatwootService) resolveEvolutionRemoteJID(payload evolutionWebhookPayl
 		return remoteJID
 	}
 
-	if pnJID := firstPhoneRemoteJID(
-		mapString(info, "SenderAlt", "senderAlt"),
-		mapString(info, "RecipientAlt", "recipientAlt"),
-		mapString(info, "Sender", "sender"),
-		mapString(data, "SenderAlt", "senderAlt"),
-		mapString(data, "RecipientAlt", "recipientAlt"),
-		mapString(data, "Sender", "sender"),
-	); pnJID != "" {
+	fromMe := payload.Event == "SendMessage" || mapBool(info, "IsFromMe", "isFromMe", "fromMe")
+	phoneCandidates := []string{}
+	if fromMe {
+		phoneCandidates = append(
+			phoneCandidates,
+			mapString(info, "RecipientAlt", "recipientAlt"),
+			mapString(data, "RecipientAlt", "recipientAlt"),
+			mapString(info, "Recipient", "recipient"),
+			mapString(data, "Recipient", "recipient"),
+		)
+	} else {
+		phoneCandidates = append(
+			phoneCandidates,
+			mapString(info, "SenderAlt", "senderAlt"),
+			mapString(data, "SenderAlt", "senderAlt"),
+			mapString(info, "Sender", "sender"),
+			mapString(data, "Sender", "sender"),
+		)
+	}
+
+	if pnJID := firstPhoneRemoteJID(phoneCandidates...); pnJID != "" {
 		return pnJID
 	}
 
@@ -2109,14 +2553,10 @@ func NewChatwootService(
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		skipCache:     cache.New(10*time.Minute, 20*time.Minute),
-		webhookCache:  cache.New(24*time.Hour, 1*time.Hour),
-		eventQueue:    make(chan chatwootEvent, 20000),
-		loggerWrapper: loggerWrapper,
-	}
-
-	for i := 0; i < 4; i++ {
-		go service.runEventWorker()
+		skipCache:      cache.New(10*time.Minute, 20*time.Minute),
+		webhookCache:   cache.New(24*time.Hour, 1*time.Hour),
+		evolutionCache: cache.New(24*time.Hour, 1*time.Hour),
+		loggerWrapper:  loggerWrapper,
 	}
 
 	return service

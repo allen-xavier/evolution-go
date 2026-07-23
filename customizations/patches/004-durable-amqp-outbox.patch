@@ -1,0 +1,1001 @@
+diff --git a/cmd/evolution-go/main.go b/cmd/evolution-go/main.go
+index c613b7e..8a0901b 100644
+--- a/cmd/evolution-go/main.go
++++ b/cmd/evolution-go/main.go
+@@ -97,6 +97,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
+ 			config.AmqpSpecificEvents,
+ 			config.AmqpUrl,
+ 			loggerWrapper,
++			db,
+ 		)
+ 	} else {
+ 		// Even if initial connection failed, pass the URL so reconnection can work
+@@ -107,6 +108,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
+ 			config.AmqpSpecificEvents,
+ 			config.AmqpUrl, // Keep the URL for reconnection attempts
+ 			loggerWrapper,
++			db,
+ 		)
+ 	}
+ 
+@@ -368,6 +370,11 @@ func main() {
+ 	}
+ 
+ 	migrate(db)
++	if cfg.AmqpGlobalEnabled {
++		if err := rabbitmq_producer.MigrateOutbox(db); err != nil {
++			log.Fatal("Failed to migrate RabbitMQ outbox: ", err)
++		}
++	}
+ 
+ 	// Initialize core DB + license runtime
+ 	core.SetDB(db)
+@@ -379,6 +386,10 @@ func main() {
+ 
+ 	var conn *amqp.Connection
+ 
++	if cfg.AmqpGlobalEnabled && cfg.AmqpUrl == "" {
++		log.Fatal("AMQP_GLOBAL_ENABLED=true requires AMQP_URL; refusing to connect WhatsApp sessions without durable event delivery")
++	}
++
+ 	if cfg.AmqpUrl != "" {
+ 		logger.LogInfo("Attempting to connect to RabbitMQ...")
+ 
+@@ -388,18 +399,32 @@ func main() {
+ 			Locale:    "en_US",
+ 		}
+ 
+-		conn, err = amqp.DialConfig(cfg.AmqpUrl, amqpConfig)
+-		if err != nil {
+-			logger.LogError("Failed to connect to RabbitMQ, err: %v", err)
+-			logger.LogInfo("RabbitMQ producer will be created with reconnection capability")
+-		} else {
+-			logger.LogInfo("Successfully connected to RabbitMQ with heartbeat enabled")
+-			defer func(conn *amqp.Connection) {
+-				err := conn.Close()
+-				if err != nil {
+-					logger.LogError("Failed to close RabbitMQ connection, err: %v", err)
+-				}
+-			}(conn)
++		for attempt := 1; ; attempt++ {
++			conn, err = amqp.DialConfig(cfg.AmqpUrl, amqpConfig)
++			if err == nil {
++				logger.LogInfo("Successfully connected to RabbitMQ with heartbeat enabled")
++				defer func(conn *amqp.Connection) {
++					err := conn.Close()
++					if err != nil {
++						logger.LogError("Failed to close RabbitMQ connection, err: %v", err)
++					}
++				}(conn)
++				break
++			}
++
++			if !cfg.AmqpGlobalEnabled {
++				logger.LogError("Failed to connect to optional RabbitMQ, err: %v", err)
++				logger.LogInfo("RabbitMQ producer will be created with reconnection capability")
++				break
++			}
++
++			logger.LogError(
++				"RabbitMQ is required and not ready (attempt %d): %v",
++				attempt,
++				err,
++			)
++			logger.LogInfo("WhatsApp startup is paused; retrying RabbitMQ in 5 seconds")
++			time.Sleep(5 * time.Second)
+ 		}
+ 	} else {
+ 		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
+diff --git a/pkg/events/rabbitmq/outbox.go b/pkg/events/rabbitmq/outbox.go
+new file mode 100644
+index 0000000..caafb6c
+--- /dev/null
++++ b/pkg/events/rabbitmq/outbox.go
+@@ -0,0 +1,232 @@
++package rabbitmq_producer
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++const (
++	outboxBatchSize = 100
++	outboxLockTTL   = time.Minute
++)
++
++type amqpOutboxMessage struct {
++	ID             string     `gorm:"type:uuid;primaryKey"`
++	EventKey       string     `gorm:"size:64;uniqueIndex;not null"`
++	QueueName      string     `gorm:"size:191;not null;index"`
++	Payload        []byte     `gorm:"type:bytea;not null"`
++	RabbitMQEnable string     `gorm:"size:32;not null"`
++	UserID         string     `gorm:"size:191;not null;index"`
++	Attempts       int        `gorm:"not null;default:0"`
++	NextAttemptAt  time.Time  `gorm:"not null;index"`
++	LastError      string     `gorm:"type:text"`
++	LockedUntil    *time.Time `gorm:"index"`
++	LockedBy       string     `gorm:"size:64;index"`
++	CreatedAt      time.Time
++	UpdatedAt      time.Time
++}
++
++func (amqpOutboxMessage) TableName() string {
++	return "evolution_amqp_outbox"
++}
++
++func MigrateOutbox(db *gorm.DB) error {
++	if db == nil {
++		return fmt.Errorf("database is nil")
++	}
++	return db.AutoMigrate(&amqpOutboxMessage{})
++}
++
++func newOutboxID() string {
++	return uuid.NewString()
++}
++
++func outboxEventKey(queueName string, payload []byte) string {
++	digest := sha256.New()
++	_, _ = digest.Write([]byte(queueName))
++	_, _ = digest.Write([]byte{0})
++	_, _ = digest.Write(payload)
++	return hex.EncodeToString(digest.Sum(nil))
++}
++
++func outboxRetryDelay(attempt int) time.Duration {
++	if attempt < 1 {
++		attempt = 1
++	}
++
++	delay := 5 * time.Second
++	for step := 1; step < attempt && delay < 5*time.Minute; step++ {
++		delay *= 2
++	}
++	if delay > 5*time.Minute {
++		return 5 * time.Minute
++	}
++	return delay
++}
++
++func truncateOutboxError(err error) string {
++	if err == nil {
++		return ""
++	}
++	const limit = 4000
++	message := err.Error()
++	if len(message) <= limit {
++		return message
++	}
++	return message[:limit]
++}
++
++func (p *rabbitMQProducer) enqueueOutbox(
++	queueName string,
++	payload []byte,
++	rabbitmqEnable string,
++	userID string,
++) (bool, error) {
++	now := time.Now().UTC()
++	job := amqpOutboxMessage{
++		ID:             newOutboxID(),
++		EventKey:       outboxEventKey(queueName, payload),
++		QueueName:      queueName,
++		Payload:        append([]byte(nil), payload...),
++		RabbitMQEnable: rabbitmqEnable,
++		UserID:         userID,
++		NextAttemptAt:  now,
++		CreatedAt:      now,
++		UpdatedAt:      now,
++	}
++
++	result := p.db.Clauses(clause.OnConflict{
++		Columns:   []clause.Column{{Name: "event_key"}},
++		DoNothing: true,
++	}).Create(&job)
++	return result.RowsAffected == 1, result.Error
++}
++
++func (p *rabbitMQProducer) signalWorker() {
++	select {
++	case p.wakeWorker <- struct{}{}:
++	default:
++	}
++}
++
++func (p *rabbitMQProducer) runOutboxWorker() {
++	ticker := time.NewTicker(5 * time.Second)
++	defer ticker.Stop()
++
++	p.signalWorker()
++	for {
++		select {
++		case <-ticker.C:
++		case <-p.wakeWorker:
++		}
++		p.processDueOutbox()
++	}
++}
++
++func (p *rabbitMQProducer) processDueOutbox() {
++	for {
++		jobs, err := p.claimDueOutbox(outboxBatchSize)
++		if err != nil {
++			p.loggerWrapper.GetLogger("system").LogError("Failed to claim AMQP outbox messages: %v", err)
++			return
++		}
++		if len(jobs) == 0 {
++			return
++		}
++
++		for _, job := range jobs {
++			if err := p.publishConfirmed(job); err != nil {
++				if updateErr := p.markOutboxRetry(job, err); updateErr != nil {
++					p.loggerWrapper.GetLogger(job.UserID).LogError(
++						"[%s] Failed to update AMQP outbox retry state: %v",
++						job.UserID,
++						updateErr,
++					)
++				}
++				p.loggerWrapper.GetLogger(job.UserID).LogError(
++					"[%s] AMQP delivery failed; event remains persisted for retry - queue: %s, error: %v",
++					job.UserID,
++					job.QueueName,
++					err,
++				)
++				continue
++			}
++
++			result := p.db.
++				Where("id = ? AND locked_by = ?", job.ID, p.workerID).
++				Delete(&amqpOutboxMessage{})
++			if result.Error != nil {
++				p.loggerWrapper.GetLogger(job.UserID).LogError(
++					"[%s] RabbitMQ confirmed delivery but outbox cleanup failed for queue %s: %v",
++					job.UserID,
++					job.QueueName,
++					result.Error,
++				)
++				continue
++			}
++			p.loggerWrapper.GetLogger(job.UserID).LogInfo(
++				"[%s] AMQP outbox event delivered and confirmed - queue: %s",
++				job.UserID,
++				job.QueueName,
++			)
++		}
++
++		if len(jobs) < outboxBatchSize {
++			return
++		}
++	}
++}
++
++func (p *rabbitMQProducer) claimDueOutbox(limit int) ([]amqpOutboxMessage, error) {
++	now := time.Now().UTC()
++	lockedUntil := now.Add(outboxLockTTL)
++	jobs := make([]amqpOutboxMessage, 0, limit)
++
++	err := p.db.Transaction(func(tx *gorm.DB) error {
++		if err := tx.
++			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
++			Where("next_attempt_at <= ? AND (locked_until IS NULL OR locked_until < ?)", now, now).
++			Order("created_at ASC").
++			Limit(limit).
++			Find(&jobs).Error; err != nil {
++			return err
++		}
++		if len(jobs) == 0 {
++			return nil
++		}
++
++		ids := make([]string, 0, len(jobs))
++		for index := range jobs {
++			ids = append(ids, jobs[index].ID)
++			jobs[index].LockedUntil = &lockedUntil
++			jobs[index].LockedBy = p.workerID
++		}
++
++		return tx.Model(&amqpOutboxMessage{}).
++			Where("id IN ?", ids).
++			Updates(map[string]interface{}{
++				"locked_until": lockedUntil,
++				"locked_by":    p.workerID,
++			}).Error
++	})
++	return jobs, err
++}
++
++func (p *rabbitMQProducer) markOutboxRetry(job amqpOutboxMessage, deliveryErr error) error {
++	attempts := job.Attempts + 1
++	return p.db.Model(&amqpOutboxMessage{}).
++		Where("id = ? AND locked_by = ?", job.ID, p.workerID).
++		Updates(map[string]interface{}{
++			"attempts":        attempts,
++			"next_attempt_at": time.Now().UTC().Add(outboxRetryDelay(attempts)),
++			"last_error":      truncateOutboxError(deliveryErr),
++			"locked_until":    nil,
++			"locked_by":       "",
++		}).Error
++}
+diff --git a/pkg/events/rabbitmq/outbox_test.go b/pkg/events/rabbitmq/outbox_test.go
+new file mode 100644
+index 0000000..39e95c9
+--- /dev/null
++++ b/pkg/events/rabbitmq/outbox_test.go
+@@ -0,0 +1,200 @@
++package rabbitmq_producer
++
++import (
++	"bytes"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++func TestOutboxEventKeyIsDeterministicAndQueueScoped(t *testing.T) {
++	payload := []byte(`{"event":"Message","id":"abc"}`)
++	first := outboxEventKey("message", payload)
++	second := outboxEventKey("message", payload)
++	otherQueue := outboxEventKey("sendmessage", payload)
++
++	if first != second {
++		t.Fatalf("expected deterministic event key, got %q and %q", first, second)
++	}
++	if first == otherQueue {
++		t.Fatal("expected queue name to be part of the event key")
++	}
++	if len(first) != 64 {
++		t.Fatalf("expected SHA-256 hex key, got length %d", len(first))
++	}
++}
++
++func TestOutboxRetryDelayIsBounded(t *testing.T) {
++	cases := []struct {
++		attempt int
++		want    time.Duration
++	}{
++		{attempt: 0, want: 5 * time.Second},
++		{attempt: 1, want: 5 * time.Second},
++		{attempt: 2, want: 10 * time.Second},
++		{attempt: 3, want: 20 * time.Second},
++		{attempt: 10, want: 5 * time.Minute},
++	}
++
++	for _, testCase := range cases {
++		if got := outboxRetryDelay(testCase.attempt); got != testCase.want {
++			t.Fatalf("attempt %d: expected %s, got %s", testCase.attempt, testCase.want, got)
++		}
++	}
++}
++
++func TestTruncateOutboxError(t *testing.T) {
++	longMessage := strings.Repeat("x", 5000)
++	got := truncateOutboxError(testError(longMessage))
++	if len(got) != 4000 {
++		t.Fatalf("expected 4000-byte error, got %d", len(got))
++	}
++}
++
++type testError string
++
++func (err testError) Error() string {
++	return string(err)
++}
++
++func TestOutboxPostgresAndRabbitMQIntegration(t *testing.T) {
++	postgresDSN := os.Getenv("TEST_POSTGRES_DSN")
++	amqpURL := os.Getenv("TEST_AMQP_URL")
++	if postgresDSN == "" || amqpURL == "" {
++		t.Skip("TEST_POSTGRES_DSN and TEST_AMQP_URL are required for integration test")
++	}
++
++	db, err := gorm.Open(postgres.Open(postgresDSN), &gorm.Config{})
++	if err != nil {
++		t.Fatalf("open PostgreSQL: %v", err)
++	}
++	if err := MigrateOutbox(db); err != nil {
++		t.Fatalf("migrate outbox: %v", err)
++	}
++
++	suffix := strings.ToLower(strings.ReplaceAll(newOutboxID(), "-", ""))
++	queueName := "outbox-integration-" + suffix
++	payload := []byte(`{"event":"integration-test","id":"` + suffix + `"}`)
++	eventKey := outboxEventKey(queueName, payload)
++
++	producer := &rabbitMQProducer{
++		connStr:  "amqp://test:testpass@127.0.0.1:1/",
++		db:       db,
++		workerID: newOutboxID(),
++	}
++	recoveredProducer := &rabbitMQProducer{
++		connStr:  amqpURL,
++		db:       db,
++		workerID: newOutboxID(),
++	}
++	t.Cleanup(func() {
++		_ = db.Where("event_key = ?", eventKey).Delete(&amqpOutboxMessage{}).Error
++		if recoveredProducer.conn != nil && !recoveredProducer.conn.IsClosed() {
++			if channel, channelErr := recoveredProducer.conn.Channel(); channelErr == nil {
++				_, _ = channel.QueueDelete(queueName, false, false, false)
++				_ = channel.Close()
++			}
++			_ = recoveredProducer.conn.Close()
++		}
++	})
++
++	inserted, err := producer.enqueueOutbox(queueName, payload, "global", "integration")
++	if err != nil {
++		t.Fatalf("enqueue first event: %v", err)
++	}
++	if !inserted {
++		t.Fatal("expected first event to be inserted")
++	}
++
++	inserted, err = producer.enqueueOutbox(queueName, payload, "global", "integration")
++	if err != nil {
++		t.Fatalf("enqueue duplicate event: %v", err)
++	}
++	if inserted {
++		t.Fatal("expected duplicate event to be ignored")
++	}
++
++	jobs, err := producer.claimDueOutbox(10)
++	if err != nil {
++		t.Fatalf("claim due event: %v", err)
++	}
++	if len(jobs) != 1 {
++		t.Fatalf("expected one claimed event, got %d", len(jobs))
++	}
++	if jobs[0].LockedBy != producer.workerID {
++		t.Fatalf("expected worker lock %q, got %q", producer.workerID, jobs[0].LockedBy)
++	}
++
++	deliveryErr := producer.publishConfirmed(jobs[0])
++	if deliveryErr == nil {
++		t.Fatal("expected delivery to fail while RabbitMQ endpoint is unavailable")
++	}
++	if err := producer.markOutboxRetry(jobs[0], deliveryErr); err != nil {
++		t.Fatalf("persist retry state: %v", err)
++	}
++
++	var persisted amqpOutboxMessage
++	if err := db.Where("event_key = ?", eventKey).First(&persisted).Error; err != nil {
++		t.Fatalf("load persisted event after delivery failure: %v", err)
++	}
++	if persisted.Attempts != 1 {
++		t.Fatalf("expected one persisted attempt, got %d", persisted.Attempts)
++	}
++	if persisted.LastError == "" {
++		t.Fatal("expected delivery error to be persisted")
++	}
++
++	if err := db.Model(&amqpOutboxMessage{}).
++		Where("event_key = ?", eventKey).
++		Updates(map[string]interface{}{
++			"next_attempt_at": time.Now().UTC(),
++			"locked_until":    nil,
++			"locked_by":       "",
++		}).Error; err != nil {
++		t.Fatalf("make event due for simulated restart: %v", err)
++	}
++
++	jobs, err = recoveredProducer.claimDueOutbox(10)
++	if err != nil {
++		t.Fatalf("claim event after simulated restart: %v", err)
++	}
++	if len(jobs) != 1 {
++		t.Fatalf("expected one event after simulated restart, got %d", len(jobs))
++	}
++	if err := recoveredProducer.publishConfirmed(jobs[0]); err != nil {
++		t.Fatalf("publish with confirmation after recovery: %v", err)
++	}
++
++	channel, err := recoveredProducer.conn.Channel()
++	if err != nil {
++		t.Fatalf("open consumer channel: %v", err)
++	}
++	defer channel.Close()
++
++	delivery, ok, err := channel.Get(queueName, true)
++	if err != nil {
++		t.Fatalf("read published event: %v", err)
++	}
++	if !ok {
++		t.Fatal("expected a published event in RabbitMQ")
++	}
++	if !bytes.Equal(delivery.Body, payload) {
++		t.Fatalf("payload mismatch: expected %q, got %q", payload, delivery.Body)
++	}
++	if delivery.MessageId != eventKey {
++		t.Fatalf("message ID mismatch: expected %q, got %q", eventKey, delivery.MessageId)
++	}
++
++	result := db.Where("id = ? AND locked_by = ?", jobs[0].ID, recoveredProducer.workerID).
++		Delete(&amqpOutboxMessage{})
++	if result.Error != nil {
++		t.Fatalf("delete confirmed outbox event: %v", result.Error)
++	}
++	if result.RowsAffected != 1 {
++		t.Fatalf("expected one deleted outbox event, got %d", result.RowsAffected)
++	}
++}
+diff --git a/pkg/events/rabbitmq/rabbitmq_producer.go b/pkg/events/rabbitmq/rabbitmq_producer.go
+index 57486d6..693bfe5 100644
+--- a/pkg/events/rabbitmq/rabbitmq_producer.go
++++ b/pkg/events/rabbitmq/rabbitmq_producer.go
+@@ -1,25 +1,31 @@
+ package rabbitmq_producer
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"net/url"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	producer_interfaces "github.com/EvolutionAPI/evolution-go/pkg/events/interfaces"
+ 	logger_wrapper "github.com/EvolutionAPI/evolution-go/pkg/logger"
+ 	"github.com/gomessguii/logger"
+ 	amqp "github.com/rabbitmq/amqp091-go"
++	"gorm.io/gorm"
+ )
+ 
+ type rabbitMQProducer struct {
+ 	conn               *amqp.Connection
++	connMu             sync.Mutex
+ 	amqpGlobalEnabled  bool
+ 	amqpGlobalEvents   []string
+ 	amqpSpecificEvents []string
+ 	connStr            string
+-	maxRetries         int
+ 	loggerWrapper      *logger_wrapper.LoggerManager
++	db                 *gorm.DB
++	workerID           string
++	wakeWorker         chan struct{}
+ }
+ 
+ func NewRabbitMQProducer(
+@@ -29,6 +35,7 @@ func NewRabbitMQProducer(
+ 	amqpSpecificEvents []string,
+ 	connStr string,
+ 	loggerWrapper *logger_wrapper.LoggerManager,
++	db *gorm.DB,
+ ) producer_interfaces.Producer {
+ 	producer := &rabbitMQProducer{
+ 		conn:               conn,
+@@ -36,14 +43,23 @@ func NewRabbitMQProducer(
+ 		amqpGlobalEvents:   amqpGlobalEvents,
+ 		amqpSpecificEvents: amqpSpecificEvents,
+ 		connStr:            connStr,
+-		maxRetries:         3,
+ 		loggerWrapper:      loggerWrapper,
++		db:                 db,
++		workerID:           newOutboxID(),
++		wakeWorker:         make(chan struct{}, 1),
++	}
++
++	if conn != nil {
++		go producer.handleConnectionClose(conn)
++	}
++	if amqpGlobalEnabled && db != nil {
++		go producer.runOutboxWorker()
+ 	}
+ 
+ 	return producer
+ }
+ 
+-// maskConnectionString masks sensitive information in the connection string for logging
++// maskConnectionString masks sensitive information in the connection string for logging.
+ func (p *rabbitMQProducer) maskConnectionString(connStr string) string {
+ 	if connStr == "" {
+ 		return "empty"
+@@ -54,7 +70,6 @@ func (p *rabbitMQProducer) maskConnectionString(connStr string) string {
+ 		return "invalid-url"
+ 	}
+ 
+-	// Mask password if present
+ 	if parsedURL.User != nil {
+ 		if _, hasPassword := parsedURL.User.Password(); hasPassword {
+ 			parsedURL.User = url.UserPassword(parsedURL.User.Username(), "***")
+@@ -64,25 +79,21 @@ func (p *rabbitMQProducer) maskConnectionString(connStr string) string {
+ 	return parsedURL.String()
+ }
+ 
+-// handleConnectionClose monitors connection close events and logs them
+-func (p *rabbitMQProducer) handleConnectionClose() {
+-	if p.conn == nil {
+-		return
+-	}
++func (p *rabbitMQProducer) handleConnectionClose(conn *amqp.Connection) {
++	closeChan := make(chan *amqp.Error, 1)
++	conn.NotifyClose(closeChan)
+ 
+-	closeChan := make(chan *amqp.Error)
+-	p.conn.NotifyClose(closeChan)
+-
+-	closeErr := <-closeChan
+-	if closeErr != nil {
+-		logger.LogWarn("RabbitMQ connection closed unexpectedly: %v", closeErr)
+-		logger.LogInfo("Connection will be re-established on next message send")
+-	} else {
++	closeErr, ok := <-closeChan
++	if !ok || closeErr == nil {
+ 		logger.LogInfo("RabbitMQ connection closed gracefully")
++		return
+ 	}
++	logger.LogWarn("RabbitMQ connection closed unexpectedly: %v", closeErr)
++	logger.LogInfo("Pending messages remain in the AMQP outbox and will be retried")
+ }
+ 
+-func (p *rabbitMQProducer) reconnect() error {
++// reconnectLocked requires connMu to be held by the caller.
++func (p *rabbitMQProducer) reconnectLocked() error {
+ 	if p.connStr == "" {
+ 		return fmt.Errorf("connection string is empty - RabbitMQ URL not configured")
+ 	}
+@@ -90,141 +101,156 @@ func (p *rabbitMQProducer) reconnect() error {
+ 	logger.LogInfo("Starting RabbitMQ reconnection process with URL: %s", p.maskConnectionString(p.connStr))
+ 
+ 	var err error
+-	for i := 0; i < 3; i++ {
+-		logger.LogInfo("Tentando reconectar ao RabbitMQ (tentativa %d/3)", i+1)
++	for attempt := 1; attempt <= 3; attempt++ {
++		logger.LogInfo("Tentando reconectar ao RabbitMQ (tentativa %d/3)", attempt)
+ 
+-		// Create connection with heartbeat to prevent timeouts
+ 		config := amqp.Config{
+-			Heartbeat: 30 * time.Second, // Send heartbeat every 30 seconds
++			Heartbeat: 30 * time.Second,
+ 			Locale:    "en_US",
+ 		}
+-
+-		p.conn, err = amqp.DialConfig(p.connStr, config)
+-		if err == nil {
++		conn, dialErr := amqp.DialConfig(p.connStr, config)
++		if dialErr == nil {
++			p.conn = conn
++			go p.handleConnectionClose(conn)
+ 			logger.LogInfo("Reconectado com sucesso ao RabbitMQ com heartbeat de 30s")
+-
+-			// Set up connection close notification
+-			go p.handleConnectionClose()
+ 			return nil
+ 		}
++		err = dialErr
+ 
+-		logger.LogError("Falha na tentativa %d/3 de reconexão: %v", i+1, err)
+-		if i < 2 { // Don't sleep on the last attempt
+-			time.Sleep(time.Second * 2)
++		logger.LogError("Falha na tentativa %d/3 de reconexão: %v", attempt, err)
++		if attempt < 3 {
++			time.Sleep(2 * time.Second)
+ 		}
+ 	}
+-	return fmt.Errorf("falha ao reconectar após 3 tentativas: %v", err)
++	return fmt.Errorf("falha ao reconectar após 3 tentativas: %w", err)
+ }
+ 
+-func (p *rabbitMQProducer) ensureConnection() error {
++func (p *rabbitMQProducer) openChannel() (*amqp.Channel, error) {
++	p.connMu.Lock()
++	defer p.connMu.Unlock()
++
+ 	if p.conn == nil || p.conn.IsClosed() {
+-		return p.reconnect()
++		if err := p.reconnectLocked(); err != nil {
++			return nil, err
++		}
+ 	}
+-	return nil
++
++	channel, err := p.conn.Channel()
++	if err != nil {
++		return nil, fmt.Errorf("falha ao abrir canal: %w", err)
++	}
++	return channel, nil
+ }
+ 
+-func (p *rabbitMQProducer) publishWithRetry(
+-	channel *amqp.Channel,
+-	queueName string,
+-	payload []byte,
+-	userID string,
+-) error {
+-	var err error
+-	for i := 0; i < p.maxRetries; i++ {
+-		err = channel.Publish(
+-			"",        // exchange
+-			queueName, // routing key
+-			false,     // mandatory
+-			false,     // immediate
+-			amqp.Publishing{
+-				ContentType:  "application/json",
+-				Body:         payload,
+-				DeliveryMode: amqp.Persistent, // Garante persistência da mensagem
+-			})
+-
+-		if err == nil {
+-			return nil
+-		}
++func queueArguments() amqp.Table {
++	return amqp.Table{
++		"x-queue-type": "quorum",
++	}
++}
+ 
+-		logger.LogWarn("[%s] Falha ao publicar mensagem (tentativa %d/%d): %v",
+-			userID, i+1, p.maxRetries, err)
++func (p *rabbitMQProducer) publishConfirmed(job amqpOutboxMessage) error {
++	channel, err := p.openChannel()
++	if err != nil {
++		return fmt.Errorf("falha ao garantir conexão: %w", err)
++	}
++	defer channel.Close()
+ 
+-		// Se o erro for de conexão, tenta reconectar
+-		if err.Error() == "Exception (504) Reason: \"channel/connection is not open\"" {
+-			if err := p.ensureConnection(); err != nil {
+-				continue
+-			}
++	if err := channel.Confirm(false); err != nil {
++		return fmt.Errorf("falha ao configurar confirmação do canal: %w", err)
++	}
+ 
+-			// Cria novo canal após reconexão
+-			channel, err = p.conn.Channel()
+-			if err != nil {
+-				continue
+-			}
+-		}
++	_, err = channel.QueueDeclare(
++		job.QueueName,
++		true,
++		false,
++		false,
++		false,
++		queueArguments(),
++	)
++	if err != nil {
++		return fmt.Errorf("falha ao declarar fila %s: %w", job.QueueName, err)
++	}
+ 
+-		time.Sleep(time.Second * time.Duration(i+1))
++	confirmations := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++
++	err = channel.PublishWithContext(
++		ctx,
++		"",
++		job.QueueName,
++		false,
++		false,
++		amqp.Publishing{
++			ContentType:  "application/json",
++			Body:         job.Payload,
++			DeliveryMode: amqp.Persistent,
++			MessageId:    job.EventKey,
++			Timestamp:    job.CreatedAt,
++		},
++	)
++	if err != nil {
++		return fmt.Errorf("falha ao publicar na fila %s: %w", job.QueueName, err)
++	}
++
++	select {
++	case confirmation, ok := <-confirmations:
++		if !ok {
++			return fmt.Errorf("canal fechado antes da confirmação da fila %s", job.QueueName)
++		}
++		if !confirmation.Ack {
++			return fmt.Errorf("RabbitMQ rejeitou a publicação na fila %s", job.QueueName)
++		}
++		return nil
++	case <-ctx.Done():
++		return fmt.Errorf("timeout aguardando confirmação da fila %s: %w", job.QueueName, ctx.Err())
+ 	}
+-	return err
+ }
+ 
++// Produce durably accepts a message by storing it in PostgreSQL. Delivery to
++// RabbitMQ is asynchronous and the row is only removed after publisher confirm.
+ func (p *rabbitMQProducer) Produce(
+ 	queueName string,
+ 	payload []byte,
+ 	rabbitmqEnable string,
+ 	userID string,
+ ) error {
+-	p.loggerWrapper.GetLogger(userID).LogInfo("[%s] RabbitMQ Producer - Starting produce for queue: %s", userID, queueName)
++	p.loggerWrapper.GetLogger(userID).LogInfo("[%s] RabbitMQ Producer - Persisting event for queue: %s", userID, queueName)
+ 
+ 	if p.connStr == "" {
+ 		return fmt.Errorf("RabbitMQ connection string is empty - check AMQP_URL configuration")
+ 	}
+-
+-	if err := p.ensureConnection(); err != nil {
+-		p.loggerWrapper.GetLogger(userID).LogError("[%s] Failed to ensure RabbitMQ connection: %v", userID, err)
+-		return fmt.Errorf("falha ao garantir conexão: %v", err)
+-	}
+-
+-	channel, err := p.conn.Channel()
+-	if err != nil {
+-		return fmt.Errorf("falha ao abrir canal: %v", err)
++	if p.db == nil {
++		return fmt.Errorf("RabbitMQ outbox database is unavailable")
+ 	}
+-	defer channel.Close()
+-
+-	// Configura confirmação de publicação
+-	if err := channel.Confirm(false); err != nil {
+-		return fmt.Errorf("falha ao configurar confirms do canal: %v", err)
++	if rabbitmqEnable != "global" && rabbitmqEnable != "enabled" {
++		return nil
+ 	}
+ 
+-	args := amqp.Table{
+-		"x-queue-type": "quorum",
+-		"x-ha-policy":  "all", // Alta disponibilidade
++	inserted, err := p.enqueueOutbox(queueName, payload, rabbitmqEnable, userID)
++	if err != nil {
++		return fmt.Errorf("falha ao persistir mensagem na outbox AMQP: %w", err)
+ 	}
+ 
+-	if rabbitmqEnable == "global" || rabbitmqEnable == "enabled" {
+-		_, err = channel.QueueDeclare(
+-			queueName, // name
+-			true,      // durable
+-			false,     // delete when unused
+-			false,     // exclusive
+-			false,     // no-wait
+-			args,      // arguments
++	if inserted {
++		p.loggerWrapper.GetLogger(userID).LogInfo(
++			"[%s] Message persisted in AMQP outbox for queue %s",
++			userID,
++			queueName,
++		)
++	} else {
++		p.loggerWrapper.GetLogger(userID).LogInfo(
++			"[%s] Duplicate AMQP event already pending for queue %s",
++			userID,
++			queueName,
+ 		)
+-		if err != nil {
+-			return fmt.Errorf("falha ao declarar fila %s: %v", queueName, err)
+-		}
+-
+-		err = p.publishWithRetry(channel, queueName, payload, userID)
+-		if err != nil {
+-			return fmt.Errorf("falha ao publicar mensagem após todas as tentativas: %v", err)
+-		}
+-
+-		p.loggerWrapper.GetLogger(userID).LogInfo("[%s] Mensagem publicada com sucesso na fila: %s", userID, queueName)
+ 	}
+-
++	p.signalWorker()
+ 	return nil
+ }
+ 
+-// CreateGlobalQueues cria todas as filas globais no startup da aplicação
++// CreateGlobalQueues creates all configured queues. At startup the caller waits
++// for RabbitMQ readiness before invoking this method.
+ func (p *rabbitMQProducer) CreateGlobalQueues() error {
+ 	if !p.amqpGlobalEnabled {
+ 		return nil
+@@ -232,50 +258,25 @@ func (p *rabbitMQProducer) CreateGlobalQueues() error {
+ 
+ 	p.loggerWrapper.GetLogger("system").LogInfo("Creating global queues for enabled events")
+ 
+-	if err := p.ensureConnection(); err != nil {
+-		return fmt.Errorf("failed to ensure connection: %v", err)
+-	}
+-
+-	channel, err := p.conn.Channel()
++	channel, err := p.openChannel()
+ 	if err != nil {
+-		return fmt.Errorf("failed to open channel: %v", err)
++		return fmt.Errorf("failed to ensure connection: %w", err)
+ 	}
+ 	defer channel.Close()
+ 
+-	args := amqp.Table{
+-		"x-queue-type": "quorum",
+-		"x-ha-policy":  "all", // Alta disponibilidade
+-	}
+-
+ 	createdQueues := 0
+-
+-	// AMQP_SPECIFIC_EVENTS tem prioridade sobre AMQP_GLOBAL_EVENTS
+ 	if len(p.amqpSpecificEvents) > 0 {
+ 		p.loggerWrapper.GetLogger("system").LogInfo("Using AMQP_SPECIFIC_EVENTS (priority over AMQP_GLOBAL_EVENTS)")
+-
+-		// Cria filas diretas para eventos específicos
+ 		for _, eventName := range p.amqpSpecificEvents {
+ 			queueName := strings.ToLower(eventName)
+-
+-			_, err = channel.QueueDeclare(
+-				queueName, // name
+-				true,      // durable
+-				false,     // delete when unused
+-				false,     // exclusive
+-				false,     // no-wait
+-				args,      // arguments
+-			)
+-			if err != nil {
+-				p.loggerWrapper.GetLogger("system").LogError("Failed to create specific queue %s: %v", queueName, err)
+-				return fmt.Errorf("failed to create specific queue %s: %v", queueName, err)
++			if _, err = channel.QueueDeclare(queueName, true, false, false, false, queueArguments()); err != nil {
++				return fmt.Errorf("failed to create specific queue %s: %w", queueName, err)
+ 			}
+ 			p.loggerWrapper.GetLogger("system").LogInfo("Specific queue created: %s", queueName)
+ 			createdQueues++
+ 		}
+ 	} else {
+ 		p.loggerWrapper.GetLogger("system").LogInfo("Using AMQP_GLOBAL_EVENTS (fallback mode)")
+-
+-		// Mapeia eventos globais para os eventos originais que precisam de filas (modo antigo)
+ 		eventMap := map[string][]string{
+ 			"MESSAGE":       {"message"},
+ 			"SEND_MESSAGE":  {"sendmessage"},
+@@ -293,27 +294,17 @@ func (p *rabbitMQProducer) CreateGlobalQueues() error {
+ 		}
+ 
+ 		for _, globalEvent := range p.amqpGlobalEvents {
+-			if queueNames, exists := eventMap[globalEvent]; exists {
+-				for _, queueName := range queueNames {
+-					_, err = channel.QueueDeclare(
+-						queueName, // name
+-						true,      // durable
+-						false,     // delete when unused
+-						false,     // exclusive
+-						false,     // no-wait
+-						args,      // arguments
+-					)
+-					if err != nil {
+-						p.loggerWrapper.GetLogger("system").LogError("Failed to create global queue %s: %v", queueName, err)
+-						return fmt.Errorf("failed to create global queue %s: %v", queueName, err)
+-					}
+-					p.loggerWrapper.GetLogger("system").LogInfo("Global queue created: %s", queueName)
+-					createdQueues++
++			for _, queueName := range eventMap[globalEvent] {
++				if _, err = channel.QueueDeclare(queueName, true, false, false, false, queueArguments()); err != nil {
++					return fmt.Errorf("failed to create global queue %s: %w", queueName, err)
+ 				}
++				p.loggerWrapper.GetLogger("system").LogInfo("Global queue created: %s", queueName)
++				createdQueues++
+ 			}
+ 		}
+ 	}
+ 
+ 	p.loggerWrapper.GetLogger("system").LogInfo("Successfully created %d global queues", createdQueues)
++	p.signalWorker()
+ 	return nil
+ }
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+index 78ec6c1..1b6e40c 100644
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -2400,9 +2400,9 @@ func (w *whatsmeowService) SendToGlobalQueues(eventType string, payload []byte,
+ 			w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Sending to AMQP queue: %s", userId, amqpQueueName)
+ 			err := w.rabbitmqProducer.Produce(amqpQueueName, payload, "global", userId)
+ 			if err != nil {
+-				w.loggerWrapper.GetLogger(userId).LogError("[%s] Failed to send message to RabbitMQ global queue %s: %v", userId, amqpQueueName, err)
++				w.loggerWrapper.GetLogger(userId).LogError("[%s] Failed to persist message for RabbitMQ global queue %s: %v", userId, amqpQueueName, err)
+ 			} else {
+-				w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Successfully sent message to RabbitMQ global queue %s", userId, amqpQueueName)
++				w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Safely accepted message for RabbitMQ global queue %s", userId, amqpQueueName)
+ 			}
+ 		} else {
+ 			w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Event %s not configured for AMQP", userId, eventType)

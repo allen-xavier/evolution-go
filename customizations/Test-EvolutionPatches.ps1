@@ -57,7 +57,7 @@ try {
     }
 
     $workspaceMount = "${repoRoot}:/workspace"
-    & docker run --rm -v $workspaceMount -w /workspace golang:1.25.0-alpine sh -c "apk add --no-cache git build-base libjpeg-turbo-dev libwebp-dev >/dev/null && /usr/local/go/bin/go test ./pkg/config ./pkg/whatsmeow/service"
+    & docker run --rm -v $workspaceMount -w /workspace golang:1.25.0-alpine sh -c "apk add --no-cache git build-base libjpeg-turbo-dev libwebp-dev >/dev/null && /usr/local/go/bin/go test ./pkg/config ./pkg/whatsmeow/service ./pkg/events/webhook ./pkg/events/rabbitmq"
     if ($LASTEXITCODE -ne 0) {
         throw "Evolution proxy policy tests failed."
     }

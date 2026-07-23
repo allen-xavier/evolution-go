@@ -1,17 +1,170 @@
 package service
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/evolution"
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/logging"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
 )
+
+type outboundFakeEvolution struct {
+	sendTextErr error
+	textCalls   int
+}
+
+func (f *outboundFakeEvolution) GetInstance(context.Context, string) (*evolution.Instance, error) {
+	return &evolution.Instance{Id: "eef4c22f-766f-4c77-a376-52219f57adfc", Token: "token", Connected: true}, nil
+}
+
+func (*outboundFakeEvolution) ListInstances(context.Context) ([]evolution.Instance, error) {
+	return nil, nil
+}
+
+func (f *outboundFakeEvolution) SendText(context.Context, *evolution.Instance, evolution.TextRequest) error {
+	f.textCalls++
+	return f.sendTextErr
+}
+
+func (*outboundFakeEvolution) SendMedia(context.Context, *evolution.Instance, evolution.MediaRequest) error {
+	return nil
+}
+
+func (*outboundFakeEvolution) SetProxy(context.Context, string, evolution.ProxyConfig) error {
+	return nil
+}
+
+func (*outboundFakeEvolution) RemoveProxy(context.Context, string) error {
+	return nil
+}
+
+func (*outboundFakeEvolution) DisconnectInstance(context.Context, string) error {
+	return nil
+}
+
+type identityMemoryRepository struct {
+	configs  map[string]*model.ChatwootConfig
+	bindings map[string]*model.ChatwootBinding
+	aliases  map[string]string
+	deleted  []uint
+	jobs     map[uint]*model.ChatwootOutboundJob
+	nextJob  uint
+}
+
+func identityKey(instanceID string, jid string) string {
+	return instanceID + "|" + normalizeRemoteJID(jid)
+}
+
+func (r *identityMemoryRepository) SaveConfig(config *model.ChatwootConfig) error {
+	if r.configs == nil {
+		r.configs = map[string]*model.ChatwootConfig{}
+	}
+	r.configs[config.InstanceID] = config
+	return nil
+}
+
+func (r *identityMemoryRepository) GetConfig(instanceID string) (*model.ChatwootConfig, error) {
+	return r.configs[instanceID], nil
+}
+
+func (r *identityMemoryRepository) SaveBinding(binding *model.ChatwootBinding) error {
+	if r.bindings == nil {
+		r.bindings = map[string]*model.ChatwootBinding{}
+	}
+	for key, current := range r.bindings {
+		if current.ID == binding.ID {
+			delete(r.bindings, key)
+		}
+	}
+	r.bindings[identityKey(binding.InstanceID, binding.RemoteJID)] = binding
+	return nil
+}
+
+func (r *identityMemoryRepository) DeleteBinding(binding *model.ChatwootBinding) error {
+	delete(r.bindings, identityKey(binding.InstanceID, binding.RemoteJID))
+	r.deleted = append(r.deleted, binding.ID)
+	return nil
+}
+
+func (r *identityMemoryRepository) GetBindingByRemoteJID(instanceID string, remoteJID string) (*model.ChatwootBinding, error) {
+	return r.bindings[identityKey(instanceID, remoteJID)], nil
+}
+
+func (r *identityMemoryRepository) GetBindingByConversationID(instanceID string, conversationID int) (*model.ChatwootBinding, error) {
+	for _, binding := range r.bindings {
+		if binding.InstanceID == instanceID && binding.ConversationID == conversationID {
+			return binding, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *identityMemoryRepository) SaveIdentityAlias(instanceID string, aliasJID string, canonicalJID string) error {
+	if r.aliases == nil {
+		r.aliases = map[string]string{}
+	}
+	r.aliases[identityKey(instanceID, aliasJID)] = normalizeRemoteJID(canonicalJID)
+	return nil
+}
+
+func (r *identityMemoryRepository) ResolveIdentityAlias(instanceID string, aliasJID string) (string, error) {
+	return r.aliases[identityKey(instanceID, aliasJID)], nil
+}
+
+func (r *identityMemoryRepository) EnqueueOutboundJob(job *model.ChatwootOutboundJob) error {
+	if r.jobs == nil {
+		r.jobs = map[uint]*model.ChatwootOutboundJob{}
+	}
+	for _, current := range r.jobs {
+		if current.InstanceID == job.InstanceID && current.ChatwootMessageID == job.ChatwootMessageID {
+			current.Payload = append([]byte(nil), job.Payload...)
+			current.NextAttemptAt = job.NextAttemptAt
+			current.LastError = job.LastError
+			return nil
+		}
+	}
+	r.nextJob++
+	job.ID = r.nextJob
+	copyJob := *job
+	copyJob.Payload = append([]byte(nil), job.Payload...)
+	r.jobs[job.ID] = &copyJob
+	return nil
+}
+
+func (r *identityMemoryRepository) ListDueOutboundJobs(now time.Time, limit int) ([]model.ChatwootOutboundJob, error) {
+	result := []model.ChatwootOutboundJob{}
+	for _, job := range r.jobs {
+		if !job.NextAttemptAt.After(now) {
+			result = append(result, *job)
+		}
+	}
+	return result, nil
+}
+
+func (r *identityMemoryRepository) SaveOutboundJob(job *model.ChatwootOutboundJob) error {
+	copyJob := *job
+	r.jobs[job.ID] = &copyJob
+	return nil
+}
+
+func (r *identityMemoryRepository) DeleteOutboundJob(job *model.ChatwootOutboundJob) error {
+	delete(r.jobs, job.ID)
+	return nil
+}
+
+func testLoggerManager() *logging.Manager {
+	return logging.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
 
 func TestExtractEvolutionTextMessage(t *testing.T) {
 	service := &chatwootService{
@@ -53,6 +206,40 @@ func TestExtractEvolutionTextMessage(t *testing.T) {
 	}
 	if msg.FromMe {
 		t.Fatal("expected incoming message")
+	}
+}
+
+func TestExtractEvolutionUnavailableMessage(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+	raw := []byte(`{
+		"event": "Message",
+		"instanceId": "eef4c22f-766f-4c77-a376-52219f57adfc",
+		"data": {
+			"Info": {
+				"Chat": "90465080737994@lid",
+				"SenderAlt": "5516991635281@s.whatsapp.net",
+				"ID": "UNAVAILABLE123",
+				"IsFromMe": false
+			},
+			"IsUnavailable": true
+		}
+	}`)
+
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	message, ok := service.extractEvolutionMessage(payload, raw)
+	if !ok {
+		t.Fatal("expected unavailable event to retain its identity")
+	}
+	if !message.Unavailable {
+		t.Fatal("expected unavailable marker to be preserved")
+	}
+	if message.RemoteJID != "5516991635281@s.whatsapp.net" {
+		t.Fatalf("unexpected unavailable remote jid: %s", message.RemoteJID)
 	}
 }
 
@@ -357,6 +544,47 @@ func TestResolveEvolutionRemoteJIDUsesSenderAltPhoneBeforeLID(t *testing.T) {
 	}
 }
 
+func TestResolveOutgoingLIDUsesRecipientAndNeverOwnSender(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+	raw := []byte(`{
+		"event": "SendMessage",
+		"instanceId": "eef4c22f-766f-4c77-a376-52219f57adfc",
+		"data": {
+			"Info": {
+				"Chat": "90465080737994@lid",
+				"Sender": "11111111111111@lid",
+				"SenderAlt": "5511000000000@s.whatsapp.net",
+				"RecipientAlt": "5516991635281@s.whatsapp.net",
+				"ID": "LID-OUT-1",
+				"IsFromMe": true
+			},
+			"Message": {
+				"conversation": "resposta"
+			}
+		}
+	}`)
+
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	message, ok := service.extractEvolutionMessage(payload, raw)
+	if !ok {
+		t.Fatal("expected message to be extracted")
+	}
+	if message.RemoteJID != "5516991635281@s.whatsapp.net" {
+		t.Fatalf("outgoing remote jid = %s, want recipient phone", message.RemoteJID)
+	}
+	if containsJID(message.IdentityAliases, "11111111111111@lid") {
+		t.Fatalf("own sender LID must not be associated with customer: %#v", message.IdentityAliases)
+	}
+	if !containsJID(message.IdentityAliases, "90465080737994@lid") {
+		t.Fatalf("customer chat LID was not captured: %#v", message.IdentityAliases)
+	}
+}
+
 func TestResolveEvolutionRemoteJIDUsesLIDResolver(t *testing.T) {
 	service := &chatwootService{
 		httpClient: &http.Client{Timeout: time.Second},
@@ -395,6 +623,204 @@ func TestResolveEvolutionRemoteJIDUsesLIDResolver(t *testing.T) {
 	}
 	if msg.RemoteJID != "5516991635281@s.whatsapp.net" {
 		t.Fatalf("unexpected remote jid: %s", msg.RemoteJID)
+	}
+}
+
+func TestCanonicalIdentityPersistsLIDAndReusesPhone(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{}
+	service := &chatwootService{
+		repository:    repository,
+		loggerWrapper: testLoggerManager(),
+	}
+
+	messageWithPhone := evolutionMessage{
+		RemoteJID:       phoneJID,
+		IdentityAliases: []string{lidJID},
+	}
+	if err := service.canonicalizeMessageIdentity(instanceID, &messageWithPhone); err != nil {
+		t.Fatal(err)
+	}
+
+	lidOnlyMessage := evolutionMessage{
+		RemoteJID:       lidJID,
+		IdentityAliases: []string{lidJID},
+	}
+	if err := service.canonicalizeMessageIdentity(instanceID, &lidOnlyMessage); err != nil {
+		t.Fatal(err)
+	}
+	if lidOnlyMessage.RemoteJID != phoneJID {
+		t.Fatalf("LID resolved to %s, want %s", lidOnlyMessage.RemoteJID, phoneJID)
+	}
+}
+
+func TestPhoneIdentityMigratesProvisionalLIDConversation(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+	)
+	provisional := &model.ChatwootBinding{
+		ID:             7,
+		InstanceID:     instanceID,
+		RemoteJID:      lidJID,
+		ConversationID: 91,
+		SourceID:       chatwootSourceID(instanceID, lidJID),
+	}
+	repository := &identityMemoryRepository{
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, lidJID): provisional,
+		},
+	}
+	service := &chatwootService{
+		repository:    repository,
+		loggerWrapper: testLoggerManager(),
+	}
+
+	binding, err := service.getOrCreateBindingByRemote(
+		&evolution.Instance{Id: instanceID},
+		&model.ChatwootConfig{InstanceID: instanceID, MergeBrazilContacts: true},
+		phoneJID,
+		[]string{lidJID},
+		"Cliente",
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.ID != provisional.ID || binding.ConversationID != provisional.ConversationID {
+		t.Fatalf("provisional conversation was not reused: %#v", binding)
+	}
+	if binding.RemoteJID != phoneJID {
+		t.Fatalf("binding remote jid = %s, want %s", binding.RemoteJID, phoneJID)
+	}
+	if old, _ := repository.GetBindingByRemoteJID(instanceID, lidJID); old != nil {
+		t.Fatal("old LID binding key should have been migrated")
+	}
+}
+
+func TestCanonicalBindingRemovesDuplicateLIDBinding(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+	)
+	canonical := &model.ChatwootBinding{
+		ID:             10,
+		InstanceID:     instanceID,
+		RemoteJID:      phoneJID,
+		ConversationID: 100,
+	}
+	duplicate := &model.ChatwootBinding{
+		ID:             11,
+		InstanceID:     instanceID,
+		RemoteJID:      lidJID,
+		ConversationID: 101,
+	}
+	repository := &identityMemoryRepository{
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, phoneJID): canonical,
+			identityKey(instanceID, lidJID):   duplicate,
+		},
+	}
+	service := &chatwootService{
+		repository:    repository,
+		loggerWrapper: testLoggerManager(),
+	}
+
+	binding, err := service.getOrCreateBindingByRemote(
+		&evolution.Instance{Id: instanceID},
+		&model.ChatwootConfig{InstanceID: instanceID},
+		phoneJID,
+		[]string{lidJID},
+		"Cliente",
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.ID != canonical.ID {
+		t.Fatalf("got binding %d, want canonical %d", binding.ID, canonical.ID)
+	}
+	if len(repository.deleted) != 1 || repository.deleted[0] != duplicate.ID {
+		t.Fatalf("duplicate binding was not removed: %#v", repository.deleted)
+	}
+}
+
+func TestFailedChatwootSendIsPersistedAndRetried(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "5516991635281@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+				InboxID:    7,
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID:             1,
+				InstanceID:     instanceID,
+				RemoteJID:      remoteJID,
+				ConversationID: 91,
+			},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{sendTextErr: errors.New("server returned error 463")}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+
+	body := []byte(`{
+		"event": "message_created",
+		"id": 249999,
+		"content": "mensagem importante",
+		"message_type": "outgoing",
+		"private": false,
+		"conversation": {
+			"id": 91,
+			"inbox_id": 7,
+			"contact_inbox": {"source_id": "unused"}
+		},
+		"sender": {"type": "user", "name": "Atendente"}
+	}`)
+	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
+		t.Fatalf("durably queued webhook should return success, got: %v", err)
+	}
+	if len(repository.jobs) != 1 {
+		t.Fatalf("expected one durable outbound job, got %d", len(repository.jobs))
+	}
+
+	var job *model.ChatwootOutboundJob
+	for _, stored := range repository.jobs {
+		copyJob := *stored
+		job = &copyJob
+	}
+	if job == nil || job.ChatwootMessageID != "249999" {
+		t.Fatalf("unexpected durable job: %#v", job)
+	}
+
+	evolutionAPI.sendTextErr = nil
+	service.processOutboundJob(job)
+	if len(repository.jobs) != 0 {
+		t.Fatalf("successful retry should delete durable job: %#v", repository.jobs)
+	}
+	if evolutionAPI.textCalls != 2 {
+		t.Fatalf("expected initial send and durable retry, got %d calls", evolutionAPI.textCalls)
+	}
+}
+
+func TestOutboundRetryDelayIsBounded(t *testing.T) {
+	if got := outboundRetryDelay(1); got != 15*time.Second {
+		t.Fatalf("first retry delay = %v", got)
+	}
+	if got := outboundRetryDelay(20); got != 5*time.Minute {
+		t.Fatalf("maximum retry delay = %v", got)
 	}
 }
 
