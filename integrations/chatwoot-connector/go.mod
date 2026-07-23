@@ -6,6 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/rabbitmq/amqp091-go v1.10.0
+	golang.org/x/net v0.25.0
 	gorm.io/driver/postgres v1.5.9
 	gorm.io/gorm v1.25.10
 )
@@ -40,7 +41,6 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/crypto v0.23.0 // indirect
-	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/text v0.15.0 // indirect

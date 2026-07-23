@@ -1,0 +1,335 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -28,6 +28,8 @@ WEBHOOK_URL=https://webhook.site/2e6af2fa-6b04-497f-b4a1-13a905728d83
+ # PROXY_PORT=8080
+ # PROXY_USERNAME=user
+ # PROXY_PASSWORD=secret
++# When true, instances without a valid proxy stay disconnected.
++# PROXY_REQUIRED=true
+ 
+ # Minio Configuration
+ MINIO_ENABLED=true
+diff --git a/docker/examples/docker-compose.swarm.yml b/docker/examples/docker-compose.swarm.yml
+--- a/docker/examples/docker-compose.swarm.yml
++++ b/docker/examples/docker-compose.swarm.yml
+@@ -43,6 +43,7 @@ services:
+       PROXY_PORT: ""
+       PROXY_USERNAME: ""
+       PROXY_PASSWORD: ""
++      PROXY_REQUIRED: "false"
+ 
+       # RabbitMQ (Opcional)
+       AMQP_URL: ""
+diff --git a/docker/examples/docker-compose.yml b/docker/examples/docker-compose.yml
+--- a/docker/examples/docker-compose.yml
++++ b/docker/examples/docker-compose.yml
+@@ -51,6 +51,7 @@ services:
+       PROXY_PORT: ""
+       PROXY_USERNAME: ""
+       PROXY_PASSWORD: ""
++      PROXY_REQUIRED: "false"
+ 
+       # Eventos
+       EVENT_IGNORE_GROUP: "false"
+diff --git a/pkg/config/config.go b/pkg/config/config.go
+--- a/pkg/config/config.go
++++ b/pkg/config/config.go
+@@ -52,6 +52,7 @@ type Config struct {
+ 	ProxyPort            string
+ 	ProxyUsername        string
+ 	ProxyPassword        string
++	ProxyRequired        bool
+ 	AmqpGlobalEvents     []string
+ 	AmqpSpecificEvents   []string
+ 	NatsUrl              string
+@@ -271,6 +272,7 @@ func Load() *Config {
+ 	proxyPort := os.Getenv(config_env.PROXY_PORT)
+ 	proxyUsername := os.Getenv(config_env.PROXY_USERNAME)
+ 	proxyPassword := os.Getenv(config_env.PROXY_PASSWORD)
++	proxyRequired := os.Getenv(config_env.PROXY_REQUIRED)
+ 
+ 	eventIgnoreGroup := os.Getenv(config_env.EVENT_IGNORE_GROUP)
+ 	eventIgnoreStatus := os.Getenv(config_env.EVENT_IGNORE_STATUS)
+@@ -372,6 +374,7 @@ func Load() *Config {
+ 		ProxyPort:            proxyPort,
+ 		ProxyUsername:        proxyUsername,
+ 		ProxyPassword:        proxyPassword,
++		ProxyRequired:        proxyRequired == "true",
+ 		EventIgnoreGroup:     eventIgnoreGroup == "true",
+ 		EventIgnoreStatus:    eventIgnoreStatus == "true",
+ 		QrcodeMaxCount:       qrMaxCount,
+diff --git a/pkg/config/env/env.go b/pkg/config/env/env.go
+--- a/pkg/config/env/env.go
++++ b/pkg/config/env/env.go
+@@ -38,6 +38,7 @@ const (
+ 	PROXY_PORT              = "PROXY_PORT"
+ 	PROXY_USERNAME          = "PROXY_USERNAME"
+ 	PROXY_PASSWORD          = "PROXY_PASSWORD"
++	PROXY_REQUIRED          = "PROXY_REQUIRED"
+ 	NATS_URL                = "NATS_URL"
+ 	NATS_GLOBAL_ENABLED     = "NATS_GLOBAL_ENABLED"
+ 	NATS_GLOBAL_EVENTS      = "NATS_GLOBAL_EVENTS"
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -283,8 +283,19 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 
+ 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
+ 
++	proxyConfig, useProxy, err := w.resolveProxyConfig(cd.Instance)
++	if err != nil {
++		reason := fmt.Sprintf("Connection blocked by proxy policy: %v", err)
++		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] %s", cd.Instance.Id, reason)
++		cd.Instance.Connected = false
++		cd.Instance.DisconnectReason = reason
++		if updateErr := w.instanceRepository.UpdateConnected(cd.Instance.Id, false, reason); updateErr != nil {
++			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to persist proxy policy failure: %v", cd.Instance.Id, updateErr)
++		}
++		return
++	}
++
+ 	var deviceStore *store.Device
+-	var err error
+ 
+ 	if w.clientPointer[cd.Instance.Id] != nil {
+ 		if w.clientPointer[cd.Instance.Id].IsConnected() {
+@@ -315,6 +326,11 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
+ 		return
+ 	}
++	defer func() {
++		if closeErr := container.Close(); closeErr != nil {
++			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Failed to close database container: %v", cd.Instance.Id, closeErr)
++		}
++	}()
+ 
+ 	if cd.Instance.Jid != "" {
+ 		jid, _ := utils.ParseJID(cd.Instance.Jid)
+@@ -392,51 +408,17 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 
+ 	w.clientPointer[cd.Instance.Id] = client
+ 
+-	if cd.IsProxy {
+-		var proxyConfig ProxyConfig
+-		err := json.Unmarshal([]byte(cd.Instance.Proxy), &proxyConfig)
++	if useProxy {
++		proxyAddress, err := utils.BuildProxyAddress(proxyConfig.Protocol, proxyConfig.Host, proxyConfig.Port, proxyConfig.Username, proxyConfig.Password)
+ 		if err != nil {
+-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] error unmarshalling proxy config", cd.Instance.Id)
++			w.blockConnectionForProxy(cd.Instance, fmt.Errorf("invalid proxy configuration: %w", err))
+ 			return
+ 		}
+-
+-		proxyProtocol := proxyConfig.Protocol
+-		proxyHost := proxyConfig.Host
+-		proxyPort := proxyConfig.Port
+-		proxyUsername := proxyConfig.Username
+-		proxyPassword := proxyConfig.Password
+-
+-		if proxyConfig.Host == "" {
+-			proxyHost = w.config.ProxyHost
+-		}
+-
+-		if proxyConfig.Port == "" {
+-			proxyPort = w.config.ProxyPort
+-		}
+-
+-		if proxyConfig.Protocol == "" {
+-			proxyProtocol = w.config.ProxyProtocol
+-		}
+-
+-		if proxyConfig.Username == "" {
+-			proxyUsername = w.config.ProxyUsername
+-		}
+-
+-		if proxyConfig.Password == "" {
+-			proxyPassword = w.config.ProxyPassword
+-		}
+-
+-		proxyAddress, err := utils.BuildProxyAddress(proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword)
+-		if err != nil {
+-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
+-		} else {
+-			err = client.SetProxyAddress(proxyAddress)
+-			if err != nil {
+-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
+-			} else {
+-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Proxy enabled (%s)", cd.Instance.Id, utils.NormalizeProxyProtocol(proxyProtocol, proxyPort))
+-			}
++		if err = client.SetProxyAddress(proxyAddress); err != nil {
++			w.blockConnectionForProxy(cd.Instance, fmt.Errorf("failed to configure proxy: %w", err))
++			return
+ 		}
++		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Proxy enabled in fail-closed mode (%s)", cd.Instance.Id, utils.NormalizeProxyProtocol(proxyConfig.Protocol, proxyConfig.Port))
+ 	}
+ 
+ 	client.EnableAutoReconnect = false
+@@ -490,19 +472,6 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
+ 					return
+ 				}
+-			} else if strings.Contains(err.Error(), "username/password authentication failed") {
+-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed, attempting to connect without proxy", cd.Instance.Id)
+-
+-				// Desabilita o proxy
+-				client.SetProxy(nil)
+-
+-				// Tenta conectar sem proxy
+-				err = client.Connect()
+-				if err != nil {
+-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
+-					return
+-				}
+-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
+ 			} else {
+ 				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
+ 				return
+@@ -526,19 +495,6 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
+ 						return
+ 					}
+-				} else if strings.Contains(err.Error(), "username/password authentication failed") {
+-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed during QR connection, attempting without proxy", cd.Instance.Id)
+-
+-					// Desabilita o proxy
+-					client.SetProxy(nil)
+-
+-					// Tenta conectar sem proxy
+-					err = client.Connect()
+-					if err != nil {
+-						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
+-						return
+-					}
+-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
+ 				} else {
+ 					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
+ 					return
+@@ -785,7 +741,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 
+ 			// restart client
+ 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
+-			w.StartClient(cd)
++			go w.StartClient(cd)
+ 			return
+ 		default:
+ 			time.Sleep(1000 * time.Millisecond)
+@@ -793,6 +749,59 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 	}
+ }
+ 
++func (w whatsmeowService) resolveProxyConfig(instance *instance_model.Instance) (ProxyConfig, bool, error) {
++	var proxyConfig ProxyConfig
++	hasInstanceProxy := strings.TrimSpace(instance.Proxy) != ""
++	hasGlobalProxy := strings.TrimSpace(w.config.ProxyHost) != "" ||
++		strings.TrimSpace(w.config.ProxyPort) != "" ||
++		strings.TrimSpace(w.config.ProxyUsername) != "" ||
++		w.config.ProxyPassword != ""
++
++	if hasInstanceProxy {
++		if err := json.Unmarshal([]byte(instance.Proxy), &proxyConfig); err != nil {
++			return ProxyConfig{}, false, fmt.Errorf("stored proxy configuration is invalid: %w", err)
++		}
++	}
++
++	if !hasInstanceProxy && !hasGlobalProxy {
++		if w.config.ProxyRequired {
++			return ProxyConfig{}, false, errors.New("PROXY_REQUIRED is enabled and this instance has no proxy")
++		}
++		return ProxyConfig{}, false, nil
++	}
++
++	if proxyConfig.Protocol == "" {
++		proxyConfig.Protocol = w.config.ProxyProtocol
++	}
++	if proxyConfig.Host == "" {
++		proxyConfig.Host = w.config.ProxyHost
++	}
++	if proxyConfig.Port == "" {
++		proxyConfig.Port = w.config.ProxyPort
++	}
++	if proxyConfig.Username == "" {
++		proxyConfig.Username = w.config.ProxyUsername
++	}
++	if proxyConfig.Password == "" {
++		proxyConfig.Password = w.config.ProxyPassword
++	}
++
++	if _, err := utils.BuildProxyAddress(proxyConfig.Protocol, proxyConfig.Host, proxyConfig.Port, proxyConfig.Username, proxyConfig.Password); err != nil {
++		return ProxyConfig{}, false, err
++	}
++	return proxyConfig, true, nil
++}
++
++func (w whatsmeowService) blockConnectionForProxy(instance *instance_model.Instance, err error) {
++	reason := fmt.Sprintf("Connection blocked by proxy policy: %v", err)
++	w.loggerWrapper.GetLogger(instance.Id).LogError("[%s] %s", instance.Id, reason)
++	instance.Connected = false
++	instance.DisconnectReason = reason
++	if updateErr := w.instanceRepository.UpdateConnected(instance.Id, false, reason); updateErr != nil {
++		w.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to persist proxy policy failure: %v", instance.Id, updateErr)
++	}
++}
++
+ func schedulePresenceUpdates(mycli *MyClient) {
+ 	ticker := time.NewTicker(1 * time.Minute)
+ 	defer ticker.Stop()
+diff --git a/pkg/whatsmeow/service/proxy_policy_test.go b/pkg/whatsmeow/service/proxy_policy_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/whatsmeow/service/proxy_policy_test.go
+@@ -0,0 +1,54 @@
++package whatsmeow_service
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/EvolutionAPI/evolution-go/pkg/config"
++	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
++)
++
++func TestResolveProxyConfigRequiresProxyWhenPolicyEnabled(t *testing.T) {
++	service := whatsmeowService{config: &config.Config{ProxyRequired: true}}
++
++	_, useProxy, err := service.resolveProxyConfig(&instance_model.Instance{})
++	if err == nil || useProxy {
++		t.Fatalf("expected missing proxy to be blocked, useProxy=%v err=%v", useProxy, err)
++	}
++	if !strings.Contains(err.Error(), "PROXY_REQUIRED") {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
++
++func TestResolveProxyConfigUsesInstanceProxy(t *testing.T) {
++	service := whatsmeowService{config: &config.Config{ProxyRequired: true}}
++	instance := &instance_model.Instance{
++		Proxy: `{"protocol":"http","host":"proxy.example","port":"823","username":"account","password":"secret"}`,
++	}
++
++	proxyConfig, useProxy, err := service.resolveProxyConfig(instance)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !useProxy || proxyConfig.Host != "proxy.example" || proxyConfig.Port != "823" {
++		t.Fatalf("unexpected proxy resolution: %#v, useProxy=%v", proxyConfig, useProxy)
++	}
++}
++
++func TestResolveProxyConfigNeverIgnoresInvalidStoredProxy(t *testing.T) {
++	service := whatsmeowService{config: &config.Config{}}
++
++	_, useProxy, err := service.resolveProxyConfig(&instance_model.Instance{Proxy: `{"host":`})
++	if err == nil || useProxy {
++		t.Fatalf("expected invalid stored proxy to be blocked, useProxy=%v err=%v", useProxy, err)
++	}
++}
++
++func TestResolveProxyConfigAllowsDirectOnlyWhenPolicyDisabled(t *testing.T) {
++	service := whatsmeowService{config: &config.Config{}}
++
++	_, useProxy, err := service.resolveProxyConfig(&instance_model.Instance{})
++	if err != nil || useProxy {
++		t.Fatalf("expected direct connection to remain available when policy is disabled, useProxy=%v err=%v", useProxy, err)
++	}
++}

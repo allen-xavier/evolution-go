@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   evolution_go:
-    image: evoapicloud/evolution-go:0.7.2
+    image: "${EVOLUTION_IMAGE}"
     networks:
       - minha_rede
     environment:
@@ -34,6 +34,7 @@ services:
       PROXY_PORT: "${PROXY_PORT}"
       PROXY_USERNAME: "${PROXY_USERNAME}"
       PROXY_PASSWORD: "${PROXY_PASSWORD}"
+      PROXY_REQUIRED: "true"
     volumes:
       - evolution_instances_shared:/app/dbdata
       - evolution_go_logs:/app/logs
@@ -69,7 +70,7 @@ services:
         - traefik.http.services.evolution-go.loadbalancer.passHostHeader=true
 
   chatwoot_connector:
-    image: ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.3.1
+    image: ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.4.1
     networks:
       - minha_rede
     environment:
@@ -79,6 +80,9 @@ services:
       EVOLUTION_API_URL: "http://evolution_go:4000"
       EVOLUTION_API_KEY: "${GLOBAL_API_KEY}"
       AMQP_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@evolution_rabbitmq:5672/"
+      CONNECTOR_PROXY_REQUIRED: "true"
+      PROXY_MONITOR_INTERVAL_SECONDS: "60"
+      PROXY_COLLISION_ACTION: "alert"
     deploy:
       mode: replicated
       replicas: 1

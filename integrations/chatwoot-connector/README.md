@@ -1,21 +1,23 @@
 # Conector Chatwoot independente
 
 Este serviço mantém a integração fora do processo e da imagem do Evolution Go.
-O Evolution roda diretamente com `evoapicloud/evolution-go:0.7.2`; o conector
+O Evolution roda com uma imagem versionada que contém o patch de proxy
+`fail-closed`; o conector
 consome os eventos globais `MESSAGE` e `SEND_MESSAGE` pelo RabbitMQ e envia as
 respostas do Chatwoot pelos endpoints oficiais `/send/text` e `/send/media`.
 
 ## Atualização do Evolution
 
-Altere somente a tag abaixo em `docker-stack.swarm.yml`:
+Na raiz do repositório, valide o patch contra a nova release antes de alterar
+`EVOLUTION_IMAGE`:
 
-```yaml
-image: evoapicloud/evolution-go:0.7.2
+```powershell
+.\customizations\Test-EvolutionPatches.ps1
 ```
 
-O conector tem imagem, build e ciclo de release próprios. Antes de promover uma
-nova versão do Evolution, valide os contratos de evento e dos endpoints de envio
-em homologação.
+Não use a imagem oficial sem o patch nesta stack: `PROXY_REQUIRED=true` só é
+reconhecido pela versão corrigida. O conector tem imagem, build e ciclo de
+release próprios.
 
 ## Build e publicação do conector
 
@@ -23,8 +25,8 @@ O Docker Swarm não faz build durante `docker stack deploy`. Publique a imagem e
 um registry acessível pelos nós:
 
 ```bash
-docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.3.1 .
-docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.3.1
+docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.4.1 .
+docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.4.1
 ```
 
 ## Deploy
@@ -43,13 +45,13 @@ Se a imagem for entregue como arquivo em vez de registry, carregue-a no nó
 manager e impeça a resolução remota durante o deploy:
 
 ```bash
-docker load -i evolution-go-chatwoot-connector-0.3.1-linux-amd64.tar.gz
+docker load -i evolution-go-chatwoot-connector-0.4.1-linux-amd64.tar.gz
 docker stack deploy --resolve-image never -c docker-stack.swarm.yml evolution
 ```
 
-O banco atual pode ser mantido. As tabelas `chatwoot_configs` e
-`chatwoot_bindings` continuam sendo usadas pelo conector, mas a imagem oficial do
-Evolution não as conhece nem as altera.
+O banco atual pode ser mantido. Além de `chatwoot_configs` e
+`chatwoot_bindings`, o conector cria `chatwoot_proxy_tests` para registrar o
+último IP validado de cada instância.
 
 ## Painel online
 
@@ -64,6 +66,39 @@ instâncias diretamente na API oficial da Evolution, mostra o estado da conexão
 carrega a configuração existente e salva os dados do Chatwoot no PostgreSQL. A
 chave administrativa é mantida apenas na sessão da aba do navegador, e os tokens
 individuais das instâncias nunca são enviados ao painel.
+
+Cada instância também possui uma aba **Proxy**. Ela lê a configuração individual
+já armazenada na tabela `instances`, mas nunca devolve a senha ao navegador. É
+possível:
+
+- alterar host, porta, protocolo, usuário e senha;
+- manter a senha atual deixando o campo de senha vazio;
+- testar as credenciais sem salvar ou reiniciar a instância;
+- confirmar o IP público de saída e o acesso a `web.whatsapp.com`;
+- detectar quando duas instâncias apresentam o mesmo IP;
+- rejeitar proxies que retornem IPs diferentes em conexões independentes;
+- salvar somente depois de um teste aprovado e com IP exclusivo.
+
+No modo obrigatório, a remoção do proxy fica desabilitada. Salvar provoca a
+reconexão da instância. O teste não possui fallback para conexão direta: se o
+proxy não funcionar, ele retorna erro.
+
+O monitor repete a validação a cada 60 segundos. Por padrão,
+`PROXY_COLLISION_ACTION=alert`: IP instável, proxy indisponível ou IP
+compartilhado geram um alerta persistente no painel, mas não encerram uma sessão
+ativa. Quando a anomalia desaparece, o estado volta automaticamente para
+validado; como a sessão não caiu, não é necessário reconectá-la.
+
+Novos proxies continuam sendo aceitos somente quando duas conexões independentes
+retornam o mesmo IP e esse IP não aparece em outra instância. Esse controle
+exige sessão sticky. Um proxy verdadeiramente rotativo será considerado
+inseguro, mas o monitor não ficará derrubando e reconectando uma sessão ativa
+para procurar outro IP.
+
+Se a operação preferir isolamento estrito em vez de continuidade, poderá definir
+`PROXY_COLLISION_ACTION=quarantine`. Nesse modo opcional, duas observações
+consecutivas colocam a instância afetada em quarentena; ela é reconectada quando
+o proxy volta a apresentar um IP estável e exclusivo.
 
 ## Configuração de uma instância pela API
 

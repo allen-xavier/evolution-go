@@ -24,7 +24,7 @@
     body { margin: 0; min-height: 100vh; color: var(--text); background:
       radial-gradient(circle at 15% -10%, rgba(38, 217, 139, .12), transparent 32rem),
       radial-gradient(circle at 95% 15%, rgba(50, 118, 255, .09), transparent 30rem), var(--bg); }
-    button, input, textarea { font: inherit; }
+    button, input, textarea, select { font: inherit; }
     button { cursor: pointer; }
     .hidden { display: none !important; }
     .app { min-height: 100vh; display: grid; grid-template-columns: 330px minmax(0, 1fr); }
@@ -60,6 +60,10 @@
     .btn.primary { border-color: transparent; color: #04150d; background: linear-gradient(135deg, #51eda8, #22c87d); }
     .btn:disabled { cursor: wait; opacity: .55; transform: none; }
     .content { max-width: 1060px; margin: auto; display: grid; gap: 18px; }
+    .tabs { max-width: 1060px; margin: 0 auto 18px; padding: 5px; display: flex; gap: 5px; width: fit-content; border: 1px solid var(--border); border-radius: 13px; background: rgba(16, 21, 31, .82); }
+    .tab { min-height: 36px; padding: 0 16px; border: 0; border-radius: 9px; color: var(--muted); font-weight: 750; font-size: 12px; background: transparent; }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: #06150e; background: var(--primary); }
     .empty { min-height: 420px; display: grid; place-items: center; text-align: center; border: 1px dashed #2d3849; border-radius: 18px; color: var(--muted); background: rgba(16, 21, 31, .45); }
     .empty strong { display: block; margin-bottom: 8px; color: var(--text); font-size: 17px; }
     .card { padding: 24px; border: 1px solid var(--border); border-radius: 18px; background: linear-gradient(155deg, rgba(21, 28, 40, .96), rgba(14, 19, 28, .96)); box-shadow: var(--shadow); }
@@ -77,15 +81,36 @@
     .field { min-width: 0; }
     .field.full { grid-column: 1 / -1; }
     label.label { display: block; margin: 0 0 7px; color: #cbd4df; font-size: 12px; font-weight: 700; }
-    input[type="text"], input[type="url"], input[type="password"], input[type="number"], textarea { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid #2a3545; border-radius: 10px; outline: none; color: var(--text); background: #0c111a; transition: .15s; }
+    input[type="text"], input[type="url"], input[type="password"], input[type="number"], textarea, select { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid #2a3545; border-radius: 10px; outline: none; color: var(--text); background: #0c111a; transition: .15s; }
     textarea { min-height: 82px; resize: vertical; }
-    input:focus, textarea:focus { border-color: var(--primary-dark); box-shadow: 0 0 0 3px rgba(38, 217, 139, .09); }
+    input:focus, textarea:focus, select:focus { border-color: var(--primary-dark); box-shadow: 0 0 0 3px rgba(38, 217, 139, .09); }
     .hint { margin: 6px 0 0; color: #748196; font-size: 10px; line-height: 1.45; }
     .checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
     .check { min-height: 48px; padding: 11px 12px; display: flex; align-items: center; gap: 9px; border: 1px solid #263142; border-radius: 11px; color: #cbd4df; background: rgba(7, 11, 17, .38); font-size: 12px; }
     .check input { width: 16px; height: 16px; accent-color: var(--primary); }
     .webhook { display: flex; gap: 8px; }
     .webhook input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .input-action { display: flex; gap: 8px; }
+    .input-action input { min-width: 0; }
+    .input-action .btn { flex: 0 0 auto; white-space: nowrap; }
+    .proxy-status { min-width: 170px; padding: 12px 14px; border: 1px solid #394558; border-radius: 12px; text-align: right; background: rgba(8, 12, 19, .55); }
+    .proxy-status strong, .proxy-status small { display: block; }
+    .proxy-status strong { color: var(--muted); font-size: 12px; }
+    .proxy-status small { margin-top: 4px; color: #748196; font-size: 10px; }
+    .proxy-status.ok { border-color: #2d684f; background: rgba(38, 217, 139, .07); }
+    .proxy-status.ok strong { color: var(--primary); }
+    .proxy-status.warning { border-color: #6c5730; background: rgba(247, 189, 84, .07); }
+    .proxy-status.warning strong { color: var(--warning); }
+    .proxy-status.error { border-color: #69353a; background: rgba(255, 107, 115, .07); }
+    .proxy-status.error strong { color: var(--danger); }
+    .proxy-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
+    .btn.danger { color: #ffdfe1; border-color: #69353a; background: #2a1518; }
+    .test-result { margin-top: 18px; padding: 15px; border: 1px solid #2d684f; border-radius: 12px; background: rgba(38, 217, 139, .07); }
+    .test-result.warning { border-color: #6c5730; background: rgba(247, 189, 84, .07); }
+    .test-result.error { border-color: #69353a; background: rgba(255, 107, 115, .07); }
+    .test-result strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .test-result p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .notice { padding: 13px 15px; border-left: 3px solid var(--warning); border-radius: 8px; color: #d7c49c; background: rgba(247, 189, 84, .07); font-size: 11px; line-height: 1.55; }
     .toast { position: fixed; right: 24px; bottom: 24px; z-index: 50; max-width: min(430px, calc(100vw - 48px)); padding: 13px 17px; border: 1px solid #315945; border-radius: 12px; color: #dffbed; background: #10261c; box-shadow: var(--shadow); font-size: 13px; }
     .toast.error { border-color: #69353a; color: #ffdfe1; background: #2a1518; }
     .overlay { position: fixed; z-index: 100; inset: 0; padding: 22px; display: grid; place-items: center; background: rgba(3, 5, 9, .82); backdrop-filter: blur(12px); }
@@ -110,10 +135,12 @@
       .topbar { display: block; }
       .actions { margin-top: 17px; }
       .actions .btn { flex: 1; }
+      .tabs { width: 100%; }
+      .tab { flex: 1; }
       .grid, .checks { grid-template-columns: 1fr; }
       .card { padding: 19px; }
       .card-head { align-items: center; }
-      .webhook { display: grid; }
+      .webhook, .input-action { display: grid; }
     }
   </style>
 </head>
@@ -129,7 +156,7 @@
         <button id="refreshBtn" class="icon-btn" title="Atualizar instâncias" aria-label="Atualizar instâncias">↻</button>
       </div>
       <div id="instances" class="instances"></div>
-      <div class="sidebar-footer">Connector Admin · v0.3.1</div>
+      <div class="sidebar-footer">Connector Admin · v0.4.1</div>
     </aside>
 
     <main>
@@ -144,6 +171,11 @@
           <button id="saveBtn" class="btn primary" disabled>Salvar configuração</button>
         </div>
       </header>
+
+      <nav id="tabs" class="tabs hidden" aria-label="Configurações da instância">
+        <button id="chatwootTab" class="tab active" type="button">Chatwoot</button>
+        <button id="proxyTab" class="tab" type="button">Proxy</button>
+      </nav>
 
       <div class="content">
         <section id="empty" class="empty">
@@ -199,6 +231,63 @@
             </div>
           </section>
         </form>
+
+        <form id="proxyForm" class="hidden" autocomplete="off">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h3>Proxy desta instância</h3>
+                <p class="card-sub">Configuração individual usada pelo Evolution para o WebSocket e as transferências de mídia.</p>
+              </div>
+              <div id="proxyStatus" class="proxy-status">
+                <strong>Não configurado</strong>
+                <small>Carregando configuração</small>
+              </div>
+            </div>
+            <div class="grid">
+              <div class="field">
+                <label class="label" for="proxyProtocol">Protocolo</label>
+                <select id="proxyProtocol">
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks5">SOCKS5</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="label" for="proxyPort">Porta</label>
+                <input id="proxyPort" type="number" min="1" max="65535" placeholder="823">
+              </div>
+              <div class="field full">
+                <label class="label" for="proxyHost">Host</label>
+                <input id="proxyHost" type="text" placeholder="gw.dataimpulse.com">
+              </div>
+              <div class="field full">
+                <label class="label" for="proxyUsername">Usuário</label>
+                <div class="input-action">
+                  <input id="proxyUsername" type="text" spellcheck="false" placeholder="login__cr.br;sessid.instancia01">
+                  <button id="addProxySessionBtn" class="btn" type="button">Adicionar sessid</button>
+                </div>
+                <p class="hint">O botão acrescenta um <b>sessid</b> exclusivo usando o nome e o ID desta instância.</p>
+              </div>
+              <div class="field full">
+                <label class="label" for="proxyPassword">Senha</label>
+                <input id="proxyPassword" type="password" placeholder="Deixe vazio para manter a senha já salva">
+                <p id="proxyPasswordHint" class="hint">A senha nunca é devolvida ao navegador.</p>
+              </div>
+            </div>
+
+            <div class="proxy-actions">
+              <button id="testProxyBtn" class="btn" type="button">Testar sem salvar</button>
+              <button id="saveProxyBtn" class="btn primary" type="submit">Salvar e reconectar</button>
+              <button id="removeProxyBtn" class="btn danger" type="button">Remover proxy</button>
+            </div>
+            <div id="proxyTestResult" class="test-result hidden" role="status"></div>
+          </section>
+
+          <div class="notice">
+            O teste usa duas conexões independentes pelo proxy, exige o mesmo IP nas duas e tenta alcançar o WhatsApp. O monitor repete a validação a cada minuto. No modo padrão, uma anomalia gera alerta sem interromper uma instância ativa.
+          </div>
+        </form>
       </div>
     </main>
   </div>
@@ -221,7 +310,7 @@
       'use strict';
       const base = '/chatwoot';
       const $ = id => document.getElementById(id);
-      const state = { key: sessionStorage.getItem('connectorApiKey') || '', instances: [], selected: null };
+      const state = { key: sessionStorage.getItem('connectorApiKey') || '', instances: [], selected: null, activeTab: 'chatwoot' };
       const fields = ['enabled','url','accountId','token','inboxId','inboxIdentifier','signMsg','reopenConversation','conversationPending','mergeBrazilContacts','importContacts','importMessages','daysLimitImportMessages','nameInbox','signDelimiter','organization','logo','webhookSecret'];
       let toastTimer;
 
@@ -295,31 +384,122 @@
         else el.value = value ?? '';
       }
 
+      function selectTab(tab) {
+        state.activeTab = tab === 'proxy' ? 'proxy' : 'chatwoot';
+        const isProxy = state.activeTab === 'proxy';
+        $('chatwootTab').classList.toggle('active', !isProxy);
+        $('proxyTab').classList.toggle('active', isProxy);
+        $('configForm').classList.toggle('hidden', isProxy || !state.selected);
+        $('proxyForm').classList.toggle('hidden', !isProxy || !state.selected);
+        $('saveBtn').classList.toggle('hidden', isProxy);
+      }
+
+      function renderProxyStatus(config) {
+        const status = $('proxyStatus');
+        const lastTest = config.lastTest || null;
+        const protectedState = config.enabled && lastTest && lastTest.working && lastTest.stableIp && lastTest.uniqueIp && !lastTest.quarantined;
+        const warningState = config.enabled && lastTest && !lastTest.quarantined && (!lastTest.stableIp || !lastTest.uniqueIp);
+        const blockedState = lastTest?.quarantined || (config.required && !config.enabled);
+        status.className = 'proxy-status' + (protectedState ? ' ok' : (warningState ? ' warning' : (blockedState ? ' error' : '')));
+        status.replaceChildren();
+        const strong = document.createElement('strong');
+        const small = document.createElement('small');
+        strong.textContent = protectedState
+          ? 'PROXY VALIDADO'
+          : (lastTest?.quarantined
+            ? 'QUARENTENA'
+            : (lastTest && !lastTest.stableIp
+              ? 'ALERTA: IP INSTÁVEL'
+              : (lastTest && !lastTest.uniqueIp
+                ? 'ALERTA: IP REPETIDO'
+                : (config.required && !config.enabled ? 'BLOQUEADA' : (config.enabled ? 'AGUARDANDO TESTE' : 'Sem proxy individual')))));
+        if (protectedState) {
+          small.textContent = `IP ${lastTest.publicIp} · exclusivo`;
+        } else if (lastTest?.quarantined) {
+          small.textContent = lastTest.unsafeReason || 'Aguardando IP estável e exclusivo';
+        } else if (lastTest && !lastTest.stableIp) {
+          small.textContent = `IP rotativo: ${(lastTest.observedIps || []).join(' → ')}`;
+        } else if (lastTest && !lastTest.uniqueIp) {
+          small.textContent = `IP repetido em ${lastTest.duplicateInstances.join(', ')}`;
+        } else {
+          small.textContent = config.enabled ? 'Teste o proxy para confirmar a proteção' : 'Proxy obrigatório não configurado';
+        }
+        status.append(strong, small);
+      }
+
+      async function loadProxy(instance) {
+        const response = await api('/proxy/' + encodeURIComponent(instance.id));
+        const config = response.data || {};
+        setField('proxyProtocol', config.protocol || 'http');
+        setField('proxyHost', config.host || '');
+        setField('proxyPort', config.port || '');
+        setField('proxyUsername', config.username || '');
+        setField('proxyPassword', '');
+        $('proxyPassword').placeholder = config.hasPassword ? 'Senha salva · deixe vazio para manter' : 'Informe a senha do proxy';
+        $('proxyPasswordHint').textContent = config.hasPassword ? 'Existe uma senha salva. Ela nunca é devolvida ao navegador.' : 'Nenhuma senha individual está salva.';
+        $('removeProxyBtn').disabled = !config.enabled || config.required;
+        $('removeProxyBtn').classList.toggle('hidden', Boolean(config.required));
+        if (config.lastTest) {
+          const unstable = !config.lastTest.stableIp;
+          const duplicate = !config.lastTest.uniqueIp;
+          const quarantined = Boolean(config.lastTest.quarantined);
+          const unsafePolicyDetail = config.quarantineOnUnsafe
+            ? 'O modo estrito pode colocar a instância em quarentena após duas observações consecutivas.'
+            : 'A sessão ativa não é interrompida; o monitor continuará verificando.';
+          showProxyResult(
+            quarantined ? 'Instância em quarentena' : (unstable ? 'Alerta: proxy com IP instável' : (duplicate ? 'Alerta: IP compartilhado' : 'Último teste aprovado')),
+            quarantined
+              ? (config.lastTest.unsafeReason || 'O monitor aguarda um IP estável e exclusivo.')
+              : (unstable
+                ? `IPs observados: ${(config.lastTest.observedIps || []).join(' → ')}. ${unsafePolicyDetail}`
+                : (duplicate
+                  ? `O IP ${config.lastTest.publicIp} também aparece em: ${(config.lastTest.duplicateInstances || []).join(', ')}. ${unsafePolicyDetail}`
+                  : `IP de saída: ${config.lastTest.publicIp} · estável e exclusivo · ${config.lastTest.latencyMs || 0} ms`)),
+            quarantined ? 'error' : ((unstable || duplicate) ? 'warning' : '')
+          );
+        } else {
+          $('proxyTestResult').classList.add('hidden');
+        }
+        renderProxyStatus(config);
+      }
+
       async function selectInstance(instance) {
         state.selected = instance;
         renderInstances();
-        $('configForm').classList.remove('hidden');
         $('empty').classList.add('hidden');
+        $('tabs').classList.remove('hidden');
+        selectTab(state.activeTab);
         $('saveBtn').disabled = true;
         $('pageTitle').textContent = instance.name || 'Instância sem nome';
         $('pageSubtitle').textContent = instance.connected ? `Conectada · ${instance.jid || instance.id}` : `Desconectada · ${instance.disconnectReason || instance.id}`;
         $('configForm').classList.add('loading');
+        $('proxyForm').classList.add('loading');
         try {
-          const response = await api('/find/' + encodeURIComponent(instance.id));
-          const config = response.data || {};
-          fields.forEach(id => setField(id, config[id]));
-          setField('signMsg', config.signMsg ?? true);
-          setField('reopenConversation', config.reopenConversation ?? true);
-          setField('mergeBrazilContacts', config.mergeBrazilContacts ?? true);
-          setField('importContacts', config.importContacts ?? true);
-          setField('importMessages', config.importMessages ?? true);
-          setField('daysLimitImportMessages', config.daysLimitImportMessages || 3);
-          setField('signDelimiter', (config.signDelimiter || '\n').replace(/\n/g, '\\n'));
-          $('ignoreJids').value = (config.ignoreJids || []).join('\n');
-          $('webhookUrl').value = location.origin + base + '/webhook/' + instance.id;
-          $('saveBtn').disabled = false;
-        } catch (error) { toast(error.message, true); }
-        finally { $('configForm').classList.remove('loading'); }
+          const [chatwootResult, proxyResult] = await Promise.allSettled([
+            api('/find/' + encodeURIComponent(instance.id)),
+            loadProxy(instance)
+          ]);
+          if (chatwootResult.status === 'fulfilled') {
+            const config = chatwootResult.value.data || {};
+            fields.forEach(id => setField(id, config[id]));
+            setField('signMsg', config.signMsg ?? true);
+            setField('reopenConversation', config.reopenConversation ?? true);
+            setField('mergeBrazilContacts', config.mergeBrazilContacts ?? true);
+            setField('importContacts', config.importContacts ?? true);
+            setField('importMessages', config.importMessages ?? true);
+            setField('daysLimitImportMessages', config.daysLimitImportMessages || 3);
+            setField('signDelimiter', (config.signDelimiter || '\n').replace(/\n/g, '\\n'));
+            $('ignoreJids').value = (config.ignoreJids || []).join('\n');
+            $('webhookUrl').value = location.origin + base + '/webhook/' + instance.id;
+            $('saveBtn').disabled = false;
+          } else {
+            toast(chatwootResult.reason.message, true);
+          }
+          if (proxyResult.status === 'rejected') toast(proxyResult.reason.message, true);
+        } finally {
+          $('configForm').classList.remove('loading');
+          $('proxyForm').classList.remove('loading');
+        }
       }
 
       function formPayload() {
@@ -345,6 +525,129 @@
         finally { $('saveBtn').disabled = false; $('saveBtn').textContent = 'Salvar configuração'; }
       }
 
+      function proxyPayload() {
+        return {
+          protocol: $('proxyProtocol').value,
+          host: $('proxyHost').value.trim(),
+          port: $('proxyPort').value.trim(),
+          username: $('proxyUsername').value.trim(),
+          password: $('proxyPassword').value
+        };
+      }
+
+      function proxySessionToken(instance) {
+        const name = String(instance?.name || 'instancia')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 24) || 'instancia';
+        const idSuffix = String(instance?.id || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '')
+          .slice(-8);
+        return idSuffix ? `${name}-${idSuffix}` : name;
+      }
+
+      function addProxySession() {
+        const username = $('proxyUsername').value.trim();
+        if (!username) {
+          toast('Informe primeiro o usuário fornecido pela DataImpulse.', true);
+          $('proxyUsername').focus();
+          return;
+        }
+        const existing = username.match(/(?:^|;)sessid\.([^;]+)/i);
+        if (existing) {
+          toast(`Este proxy já possui o sessid ${existing[1]}.`);
+          return;
+        }
+        const token = proxySessionToken(state.selected);
+        $('proxyUsername').value = username.replace(/;+$/g, '') + `;sessid.${token}`;
+        showProxyResult(
+          'Sessid exclusivo acrescentado',
+          `Foi preparado o sessid ${token}. Teste o proxy e, se o IP permanecer igual, salve para reconectar.`
+        );
+        toast('Sessid acrescentado. Agora teste o proxy antes de salvar.');
+      }
+
+      function showProxyResult(title, detail, tone = '') {
+        const result = $('proxyTestResult');
+        const toneClass = tone === true || tone === 'error' ? ' error' : (tone === 'warning' ? ' warning' : '');
+        result.className = 'test-result' + toneClass;
+        result.replaceChildren();
+        const strong = document.createElement('strong');
+        const paragraph = document.createElement('p');
+        strong.textContent = title;
+        paragraph.textContent = detail;
+        result.append(strong, paragraph);
+      }
+
+      async function testProxy() {
+        if (!state.selected) return;
+        $('testProxyBtn').disabled = true;
+        $('testProxyBtn').textContent = 'Testando…';
+        $('proxyTestResult').classList.add('hidden');
+        try {
+          const response = await api('/proxy/' + encodeURIComponent(state.selected.id) + '/test', {
+            method: 'POST',
+            body: JSON.stringify(proxyPayload())
+          });
+          const result = response.data || {};
+          const unstable = !result.stableIp;
+          const duplicate = !result.uniqueIp;
+          showProxyResult(
+            unstable ? 'Proxy rotativo — salvamento bloqueado' : (duplicate ? 'Proxy funciona, mas o IP está repetido' : 'Proxy funcionando com IP estável e exclusivo'),
+            unstable
+              ? `Conexões independentes retornaram: ${(result.observedIps || []).join(' → ')}. Use uma sessão sticky.`
+              : (duplicate
+                ? `IP ${result.publicIp} também usado por: ${(result.duplicateInstances || []).join(', ')}. O salvamento será bloqueado.`
+                : `IP de saída: ${result.publicIp || 'não informado'} · estável · WhatsApp acessível (HTTP ${result.whatsAppStatus || 0}) · ${result.latencyMs || 0} ms`),
+            unstable || duplicate
+          );
+        } catch (error) {
+          showProxyResult('Falha no teste do proxy', error.message, true);
+        } finally {
+          $('testProxyBtn').disabled = false;
+          $('testProxyBtn').textContent = 'Testar sem salvar';
+        }
+      }
+
+      async function saveProxy() {
+        if (!state.selected) return;
+        if (!window.confirm('Salvar o proxy reiniciará a conexão desta instância. Continuar?')) return;
+        $('saveProxyBtn').disabled = true;
+        $('saveProxyBtn').textContent = 'Testando e salvando…';
+        try {
+          await api('/proxy/' + encodeURIComponent(state.selected.id), {
+            method: 'PUT',
+            body: JSON.stringify(proxyPayload())
+          });
+          toast('Proxy testado, IP exclusivo confirmado e configuração salva. A instância está reconectando.');
+          await loadProxy(state.selected);
+          await loadInstances(false);
+        } catch (error) {
+          toast(error.message, true);
+        } finally {
+          $('saveProxyBtn').disabled = false;
+          $('saveProxyBtn').textContent = 'Salvar e reconectar';
+        }
+      }
+
+      async function removeProxy() {
+        if (!state.selected) return;
+        if (!window.confirm('Remover o proxy pode expor o IP do servidor. Continuar?')) return;
+        $('removeProxyBtn').disabled = true;
+        try {
+          await api('/proxy/' + encodeURIComponent(state.selected.id), { method: 'DELETE' });
+          toast('Proxy removido. A instância está reconectando sem proxy individual.');
+          await loadProxy(state.selected);
+          await loadInstances(false);
+        } catch (error) {
+          toast(error.message, true);
+        }
+      }
+
       $('loginForm').addEventListener('submit', async event => {
         event.preventDefault();
         state.key = $('apiKey').value.trim();
@@ -360,9 +663,28 @@
       });
       $('saveBtn').addEventListener('click', save);
       $('configForm').addEventListener('submit', event => { event.preventDefault(); save(); });
+      $('chatwootTab').addEventListener('click', () => selectTab('chatwoot'));
+      $('proxyTab').addEventListener('click', () => selectTab('proxy'));
+      $('proxyForm').addEventListener('submit', event => { event.preventDefault(); saveProxy(); });
+      $('addProxySessionBtn').addEventListener('click', addProxySession);
+      $('testProxyBtn').addEventListener('click', testProxy);
+      $('removeProxyBtn').addEventListener('click', removeProxy);
       $('refreshBtn').addEventListener('click', () => loadInstances(false).then(() => toast('Instâncias atualizadas.')).catch(error => toast(error.message, true)));
       $('copyBtn').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('webhookUrl').value); toast('URL copiada.'); } catch (_) { $('webhookUrl').select(); document.execCommand('copy'); toast('URL copiada.'); } });
       $('logoutBtn').addEventListener('click', () => { sessionStorage.removeItem('connectorApiKey'); state.key = ''; $('loginOverlay').classList.remove('hidden'); $('apiKey').focus(); });
+
+      window.setInterval(async () => {
+        if (!state.key || document.hidden) return;
+        try {
+          await loadInstances(false);
+          const editingProxy = state.activeTab === 'proxy' && $('proxyForm').contains(document.activeElement);
+          if (state.selected && state.activeTab === 'proxy' && !editingProxy) {
+            await loadProxy(state.selected);
+          }
+        } catch (_) {
+          // A atualização manual continua disponível se o monitor estiver temporariamente indisponível.
+        }
+      }, 60000);
 
       if (state.key) {
         $('loginOverlay').classList.add('hidden');

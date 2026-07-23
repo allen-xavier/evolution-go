@@ -35,6 +35,28 @@ func TestGetInstanceUsesGlobalAPIKey(t *testing.T) {
 	}
 }
 
+func TestDisconnectInstanceUsesAdministrativeEndpoint(t *testing.T) {
+	var method, path, apiKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		path = r.URL.Path
+		apiKey = r.Header.Get("apikey")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "global-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DisconnectInstance(context.Background(), "instance 1"); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/instance/disconnect/instance 1" || apiKey != "global-key" {
+		t.Fatalf("unexpected request: method=%s path=%s apiKey=%s", method, path, apiKey)
+	}
+}
+
 func TestListInstancesUsesGlobalAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/instance/all" {
@@ -87,6 +109,46 @@ func TestSendTextUsesInstanceTokenAndEvolutionPayload(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSetAndRemoveProxyUseAdminAPI(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("apikey") != "global-key" {
+			t.Fatalf("unexpected api key: %s", r.Header.Get("apikey"))
+		}
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPost {
+			var body ProxyConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Host != "proxy.example" || body.Password != "secret" {
+				t.Fatalf("unexpected proxy payload: %#v", body)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL, "global-key")
+	if err := client.SetProxy(context.Background(), "instance-1", ProxyConfig{
+		Protocol: "http",
+		Host:     "proxy.example",
+		Port:     "823",
+		Username: "user",
+		Password: "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RemoveProxy(context.Background(), "instance-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 ||
+		calls[0] != "POST /instance/proxy/instance-1" ||
+		calls[1] != "DELETE /instance/proxy/instance-1" {
+		t.Fatalf("unexpected calls: %#v", calls)
 	}
 }
 

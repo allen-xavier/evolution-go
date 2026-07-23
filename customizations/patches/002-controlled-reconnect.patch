@@ -1,0 +1,242 @@
+diff --git a/pkg/instance/service/instance_service.go b/pkg/instance/service/instance_service.go
+--- a/pkg/instance/service/instance_service.go
++++ b/pkg/instance/service/instance_service.go
+@@ -300,28 +300,22 @@ func (i instances) Reconnect(instance *instance_model.Instance) error {
+ 	return i.whatsmeowService.ReconnectClient(instance.Id)
+ }
+ 
+ func (i instances) Disconnect(instance *instance_model.Instance) (*instance_model.Instance, error) {
++	i.whatsmeowService.SetReconnectTerminal(instance.Id, true)
+ 	client, err := i.ensureClientConnected(instance.Id)
+ 	if err != nil {
+-		return instance, err
++		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Instance already disconnected; reconnect remains paused", instance.Id)
++		return instance, nil
+ 	}
+ 
+ 	if client.IsConnected() {
+ 		if client.IsLoggedIn() {
+ 			i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Disconnection successful", instance.Id)
+ 			i.killChannel[instance.Id] <- true
+-
+-			instance.Events = ""
+-
+-			err := i.instanceRepository.Update(instance)
+-			if err != nil {
+-				return instance, err
+-			}
+-
+ 			return instance, nil
+ 		}
+ 	}
+ 
+ 	i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Ignoring disconnect as it was not connected", instance.Id)
+ 	return instance, nil
+ }
+@@ -590,6 +583,7 @@ func (i instances) SetProxy(id string, proxyConfig *ProxyConfig) error {
+ 	i.loggerWrapper.GetLogger(id).LogInfo("[%s] Proxy configuration updated: %s://%s:%s", id, proxyConfig.Protocol, proxyConfig.Host, proxyConfig.Port)
+ 
+ 	// Reconnect to apply proxy changes
++	i.whatsmeowService.SetReconnectTerminal(id, false)
+ 	go i.Reconnect(instance)
+ 
+ 	return nil
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -54,6 +54,8 @@ type WhatsmeowService interface {
+ 	ConnectOnStartup(clientName string)
+ 	StartInstance(instanceId string) error
+ 	ReconnectClient(instanceId string) error
++	ScheduleReconnect(instanceId string)
++	SetReconnectTerminal(instanceId string, terminal bool)
+ 	ClearInstanceCache(instanceId string, token string) error
+ 	CallWebhook(instance *instance_model.Instance, queueName string, jsonData []byte)
+ 	SendToGlobalQueues(event string, jsonData []byte, userId string)
+@@ -89,6 +91,8 @@ type whatsmeowService struct {
+ 	processedMessages  *cache.Cache
+ 	natsProducer       producer_interfaces.Producer
+ 	loggerWrapper      *logger_wrapper.LoggerManager
++	reconnectRunning   *sync.Map
++	reconnectTerminal  *sync.Map
+ }
+ 
+ type MyClient struct {
+@@ -150,6 +154,10 @@ type ProxyConfig struct {
+ }
+ 
+ func (w whatsmeowService) ReconnectClient(instanceId string) error {
++	if _, terminal := w.reconnectTerminal.Load(instanceId); terminal {
++		return fmt.Errorf("automatic reconnect blocked by terminal session state")
++	}
++
+ 	w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Starting reconnection process - simulating restart", instanceId)
+ 
+ 	// Passo 1: Limpar conexão existente se houver
+@@ -216,6 +224,68 @@ func (w whatsmeowService) ReconnectClient(instanceId string) error {
+ 	return w.StartInstance(instanceId)
+ }
+ 
++func reconnectDelay(attempt int) time.Duration {
++	if attempt < 0 {
++		attempt = 0
++	}
++	delay := 15 * time.Second
++	for step := 0; step < attempt && delay < 5*time.Minute; step++ {
++		delay *= 2
++		if delay > 5*time.Minute {
++			delay = 5 * time.Minute
++		}
++	}
++	return delay
++}
++
++func (w whatsmeowService) SetReconnectTerminal(instanceId string, terminal bool) {
++	if terminal {
++		w.reconnectTerminal.Store(instanceId, true)
++		return
++	}
++	w.reconnectTerminal.Delete(instanceId)
++}
++
++func (w whatsmeowService) ScheduleReconnect(instanceId string) {
++	if _, terminal := w.reconnectTerminal.Load(instanceId); terminal {
++		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Automatic reconnect skipped because the session is in a terminal state", instanceId)
++		return
++	}
++	if _, alreadyRunning := w.reconnectRunning.LoadOrStore(instanceId, true); alreadyRunning {
++		w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Reconnect scheduler already running", instanceId)
++		return
++	}
++
++	go func() {
++		defer w.reconnectRunning.Delete(instanceId)
++		for attempt := 0; ; attempt++ {
++			delay := reconnectDelay(attempt)
++			w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Next reconnect attempt in %s", instanceId, delay)
++			time.Sleep(delay)
++
++			if _, terminal := w.reconnectTerminal.Load(instanceId); terminal {
++				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Reconnect scheduler stopped by terminal session state", instanceId)
++				return
++			}
++
++			instance, err := w.instanceRepository.GetInstanceByID(instanceId)
++			if err != nil {
++				w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Reconnect scheduler stopped because the instance no longer exists", instanceId)
++				return
++			}
++			if instance.Connected {
++				w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Reconnect scheduler stopped after a successful connection", instanceId)
++				return
++			}
++
++			w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Running reconnect attempt %d", instanceId, attempt+1)
++			if err := w.ReconnectClient(instanceId); err != nil {
++				w.loggerWrapper.GetLogger(instanceId).LogError("[%s] Reconnect attempt %d failed: %v", instanceId, attempt+1, err)
++			}
++		}
++	}()
++}
++
+ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error {
+ 	instance, err := w.instanceRepository.GetInstanceByID(instanceId)
+ 	if err != nil {
+@@ -739,9 +809,6 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
+ 			}
+ 
+-			// restart client
+-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
+-			go w.StartClient(cd)
+ 			return
+ 		default:
+ 			time.Sleep(1000 * time.Millisecond)
+@@ -872,6 +939,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 	case *events.Connected, *events.PushNameSetting:
+ 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] events.Connected to Whatsapp for user '%s'", mycli.userID, mycli.WAClient.Store.PushName)
+ 		if len(mycli.WAClient.Store.PushName) > 0 {
++			mycli.service.SetReconnectTerminal(mycli.userID, false)
+ 			doWebhook = true
+ 			postMap["event"] = "Connected"
+ 
+@@ -936,6 +1004,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 			}
+ 		}
+ 	case *events.PairSuccess:
++		mycli.service.SetReconnectTerminal(mycli.userID, false)
+ 		doWebhook = true
+ 		postMap["event"] = "PairSuccess"
+ 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("QR Pair Success for user '%s' with JID '%s' - '%s'", mycli.userID, evt.ID.String(), mycli.WAClient.Store.ID.String())
+@@ -1719,6 +1788,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 	case *events.AppState:
+ 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] App state event received %+v", mycli.userID, evt)
+ 	case *events.LoggedOut:
++		mycli.service.SetReconnectTerminal(mycli.userID, true)
+ 		doWebhook = true
+ 		postMap["event"] = "LoggedOut"
+ 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Logged out for reason %s", mycli.userID, evt.Reason.String())
+@@ -1852,6 +1922,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 		if err != nil {
+ 			mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
+ 		}
++		mycli.service.ScheduleReconnect(mycli.userID)
+ 	case *events.Disconnected:
+ 		doWebhook = true
+ 		postMap["event"] = "Disconnected"
+@@ -1867,13 +1938,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 			mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
+ 		}
+ 
+-		// Trigger instance restart via websocket-capable service (non-blocking)
+-		go func(instanceID string) {
+-			mycli.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Disconnected detected, restarting instance", instanceID)
+-			if err := mycli.service.ReconnectClient(instanceID); err != nil {
+-				mycli.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to restart instance: %v", instanceID, err)
+-			}
+-		}(mycli.userID)
++		mycli.service.ScheduleReconnect(mycli.userID)
+ 	case *events.LabelEdit:
+ 		doWebhook = true
+ 		postMap["event"] = "LabelEdit"
+@@ -2695,6 +2760,8 @@ func NewWhatsmeowService(
+ 		processedMessages:  cache.New(30*time.Minute, 1*time.Hour),
+ 		natsProducer:       natsProducer,
+ 		loggerWrapper:      loggerWrapper,
++		reconnectRunning:   &sync.Map{},
++		reconnectTerminal:  &sync.Map{},
+ 	}
+ }
+ 
+diff --git a/pkg/whatsmeow/service/reconnect_policy_test.go b/pkg/whatsmeow/service/reconnect_policy_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/whatsmeow/service/reconnect_policy_test.go
+@@ -0,0 +1,27 @@
++package whatsmeow_service
++
++import (
++	"testing"
++	"time"
++)
++
++func TestReconnectDelayUsesExponentialBackoffWithCap(t *testing.T) {
++	tests := []struct {
++		attempt int
++		want    time.Duration
++	}{
++		{attempt: 0, want: 15 * time.Second},
++		{attempt: 1, want: 30 * time.Second},
++		{attempt: 2, want: time.Minute},
++		{attempt: 3, want: 2 * time.Minute},
++		{attempt: 4, want: 4 * time.Minute},
++		{attempt: 5, want: 5 * time.Minute},
++		{attempt: 20, want: 5 * time.Minute},
++	}
++
++	for _, test := range tests {
++		if got := reconnectDelay(test.attempt); got != test.want {
++			t.Fatalf("attempt %d: expected %s, got %s", test.attempt, test.want, got)
++		}
++	}
++}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/httpapi"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/logging"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/proxymanager"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/repository"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/service"
 )
@@ -38,12 +40,21 @@ func run(logger *slog.Logger) error {
 	evolutionAPIKey := requiredEnv("EVOLUTION_API_KEY")
 	amqpURL := requiredEnv("AMQP_URL")
 	port := envOrDefault("PORT", "4100")
+	proxyRequired := !strings.EqualFold(envOrDefault("CONNECTOR_PROXY_REQUIRED", "true"), "false")
+	proxyCollisionAction := strings.ToLower(strings.TrimSpace(envOrDefault("PROXY_COLLISION_ACTION", "alert")))
+	if proxyCollisionAction != "alert" && proxyCollisionAction != "quarantine" {
+		return fmt.Errorf("PROXY_COLLISION_ACTION must be alert or quarantine")
+	}
+	proxyMonitorSeconds, err := strconv.Atoi(envOrDefault("PROXY_MONITOR_INTERVAL_SECONDS", "60"))
+	if err != nil || proxyMonitorSeconds < 15 {
+		return fmt.Errorf("PROXY_MONITOR_INTERVAL_SECONDS must be an integer greater than or equal to 15")
+	}
 
 	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
-	if err := db.AutoMigrate(&model.ChatwootConfig{}, &model.ChatwootBinding{}); err != nil {
+	if err := db.AutoMigrate(&model.ChatwootConfig{}, &model.ChatwootBinding{}, &proxymanager.TestRecord{}); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	if err := migrateLegacyBindings(db); err != nil {
@@ -60,9 +71,15 @@ func run(logger *slog.Logger) error {
 		nil,
 		logging.New(logger),
 	)
+	proxyManager := proxymanager.New(proxymanager.NewGormRepository(db), evolutionClient, proxyRequired)
+	proxyManager.SetQuarantineOnUnsafe(proxyCollisionAction == "quarantine")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go proxyManager.RunMonitor(ctx, time.Duration(proxyMonitorSeconds)*time.Second, func(err error) {
+		logger.Error("proxy safety monitor failed", "error", err)
+	})
 
 	go func() {
 		if err := broker.Run(ctx, amqpURL, logger, chatwootService.HandleEvolutionEvent); err != nil {
@@ -73,7 +90,7 @@ func run(logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           httpapi.New(chatwootService, evolutionClient, connectorAPIKey),
+		Handler:           httpapi.New(chatwootService, evolutionClient, proxyManager, connectorAPIKey),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       70 * time.Second,
 		WriteTimeout:      70 * time.Second,

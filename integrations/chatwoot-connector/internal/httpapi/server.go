@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/evolution"
 	chatwoot_model "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/proxymanager"
 	chatwoot_service "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -18,7 +20,14 @@ const maxWebhookBytes = 100 << 20
 //go:embed ui/index.html
 var uiFiles embed.FS
 
-func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, adminAPIKey string) *gin.Engine {
+type ProxyManager interface {
+	Get(instanceID string) (*proxymanager.ConfigView, error)
+	Set(ctx context.Context, instanceID string, input proxymanager.ConfigInput) (*proxymanager.ConfigView, error)
+	Remove(ctx context.Context, instanceID string) error
+	Test(ctx context.Context, instanceID string, input proxymanager.ConfigInput) (*proxymanager.TestResult, error)
+}
+
+func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, proxyManager ProxyManager, adminAPIKey string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -37,8 +46,65 @@ func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, a
 	protected.POST("/set/:instanceId", setHandler(service))
 	protected.GET("/find/:instanceId", findHandler(service))
 	protected.GET("/instances", instancesHandler(evolutionAPI))
+	protected.GET("/proxy/:instanceId", getProxyHandler(proxyManager))
+	protected.PUT("/proxy/:instanceId", setProxyHandler(proxyManager))
+	protected.DELETE("/proxy/:instanceId", removeProxyHandler(proxyManager))
+	protected.POST("/proxy/:instanceId/test", testProxyHandler(proxyManager))
 
 	return router
+}
+
+func getProxyHandler(manager ProxyManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		config, err := manager.Get(strings.TrimSpace(c.Param("instanceId")))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": config})
+	}
+}
+
+func setProxyHandler(manager ProxyManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var input proxymanager.ConfigInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		config, err := manager.Set(c.Request.Context(), strings.TrimSpace(c.Param("instanceId")), input)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": config})
+	}
+}
+
+func removeProxyHandler(manager ProxyManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := manager.Remove(c.Request.Context(), strings.TrimSpace(c.Param("instanceId"))); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success"})
+	}
+}
+
+func testProxyHandler(manager ProxyManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var input proxymanager.ConfigInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := manager.Test(c.Request.Context(), strings.TrimSpace(c.Param("instanceId")), input)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": result})
+	}
 }
 
 func uiHandler(c *gin.Context) {

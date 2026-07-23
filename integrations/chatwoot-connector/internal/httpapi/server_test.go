@@ -42,9 +42,12 @@ func (fakeEvolution) SendText(context.Context, *evolution.Instance, evolution.Te
 func (fakeEvolution) SendMedia(context.Context, *evolution.Instance, evolution.MediaRequest) error {
 	return nil
 }
+func (fakeEvolution) SetProxy(context.Context, string, evolution.ProxyConfig) error { return nil }
+func (fakeEvolution) RemoveProxy(context.Context, string) error                     { return nil }
+func (fakeEvolution) DisconnectInstance(context.Context, string) error              { return nil }
 
 func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
-	router := New(fakeService{}, fakeEvolution{}, "global-key")
+	router := New(fakeService{}, fakeEvolution{}, nil, "global-key")
 
 	uiRequest := httptest.NewRequest(http.MethodGet, "/chatwoot", nil)
 	uiResponse := httptest.NewRecorder()
@@ -62,7 +65,7 @@ func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
 }
 
 func TestInstancesEndpointDoesNotExposeInstanceTokens(t *testing.T) {
-	router := New(fakeService{}, fakeEvolution{}, "global-key")
+	router := New(fakeService{}, fakeEvolution{}, nil, "global-key")
 	request := httptest.NewRequest(http.MethodGet, "/chatwoot/instances", nil)
 	request.Header.Set("apikey", "global-key")
 	response := httptest.NewRecorder()

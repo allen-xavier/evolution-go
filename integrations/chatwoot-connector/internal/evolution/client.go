@@ -40,11 +40,22 @@ type MediaRequest struct {
 	Data      []byte
 }
 
+type ProxyConfig struct {
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type API interface {
 	GetInstance(ctx context.Context, instanceID string) (*Instance, error)
 	ListInstances(ctx context.Context) ([]Instance, error)
 	SendText(ctx context.Context, instance *Instance, request TextRequest) error
 	SendMedia(ctx context.Context, instance *Instance, request MediaRequest) error
+	SetProxy(ctx context.Context, instanceID string, config ProxyConfig) error
+	RemoveProxy(ctx context.Context, instanceID string) error
+	DisconnectInstance(ctx context.Context, instanceID string) error
 }
 
 type Client struct {
@@ -133,6 +144,65 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 
 func (c *Client) SendText(ctx context.Context, instance *Instance, payload TextRequest) error {
 	return c.sendJSON(ctx, instance, "/send/text", payload)
+}
+
+func (c *Client) SetProxy(ctx context.Context, instanceID string, config ProxyConfig) error {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return fmt.Errorf("evolution instance id is missing")
+	}
+	body, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/instance/proxy/"+url.PathEscape(instanceID),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("apikey", c.globalAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req)
+}
+
+func (c *Client) RemoveProxy(ctx context.Context, instanceID string) error {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return fmt.Errorf("evolution instance id is missing")
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodDelete,
+		c.baseURL+"/instance/proxy/"+url.PathEscape(instanceID),
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("apikey", c.globalAPIKey)
+	return c.do(req)
+}
+
+func (c *Client) DisconnectInstance(ctx context.Context, instanceID string) error {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return fmt.Errorf("evolution instance id is missing")
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/instance/disconnect/"+url.PathEscape(instanceID),
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("apikey", c.globalAPIKey)
+	return c.do(req)
 }
 
 func (c *Client) SendMedia(ctx context.Context, instance *Instance, payload MediaRequest) error {
