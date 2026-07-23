@@ -23,8 +23,8 @@ O Docker Swarm não faz build durante `docker stack deploy`. Publique a imagem e
 um registry acessível pelos nós:
 
 ```bash
-docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.2.0 .
-docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.2.0
+docker build -t ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.3.1 .
+docker push ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.3.1
 ```
 
 ## Deploy
@@ -43,7 +43,7 @@ Se a imagem for entregue como arquivo em vez de registry, carregue-a no nó
 manager e impeça a resolução remota durante o deploy:
 
 ```bash
-docker load -i evolution-go-chatwoot-connector-0.2.0-linux-amd64.tar.gz
+docker load -i evolution-go-chatwoot-connector-0.3.1-linux-amd64.tar.gz
 docker stack deploy --resolve-image never -c docker-stack.swarm.yml evolution
 ```
 

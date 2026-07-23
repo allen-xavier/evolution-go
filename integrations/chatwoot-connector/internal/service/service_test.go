@@ -3,9 +3,14 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
 )
 
 func TestExtractEvolutionTextMessage(t *testing.T) {
@@ -87,11 +92,169 @@ func TestExtractEvolutionMediaMessageWithBase64(t *testing.T) {
 	if msg.Content != "foto" {
 		t.Fatalf("unexpected content: %s", msg.Content)
 	}
-	if msg.MediaType != "image" {
-		t.Fatalf("unexpected media type: %s", msg.MediaType)
+	if msg.Media.FileType != "image" {
+		t.Fatalf("unexpected media type: %s", msg.Media.FileType)
 	}
-	if string(msg.Media) != "image-bytes" {
-		t.Fatalf("unexpected media bytes: %q", string(msg.Media))
+	if msg.Media.MIMEType != "image/jpeg" {
+		t.Fatalf("unexpected media mime: %s", msg.Media.MIMEType)
+	}
+	if string(msg.Media.Data) != "image-bytes" {
+		t.Fatalf("unexpected media bytes: %q", string(msg.Media.Data))
+	}
+}
+
+func TestNormalizeMediaAttachmentRepairsMIMEAndExtension(t *testing.T) {
+	tests := []struct {
+		name          string
+		attachment    mediaAttachment
+		wantMIME      string
+		wantType      string
+		wantExtension string
+	}{
+		{
+			name: "whatsapp ogg voice note",
+			attachment: mediaAttachment{
+				Data:     append([]byte("OggS\x00"), make([]byte, 32)...),
+				FileType: "audio",
+				MIMEType: "application/octet-stream",
+			},
+			wantMIME:      "audio/ogg",
+			wantType:      "audio",
+			wantExtension: ".ogg",
+		},
+		{
+			name: "jpeg without extension",
+			attachment: mediaAttachment{
+				Data:     []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00},
+				FileType: "image",
+				MIMEType: "application/octet-stream",
+				FileName: "foto",
+			},
+			wantMIME:      "image/jpeg",
+			wantType:      "image",
+			wantExtension: ".jpg",
+		},
+		{
+			name: "pdf with wrong mime and extension",
+			attachment: mediaAttachment{
+				Data:     []byte("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n"),
+				FileType: "document",
+				MIMEType: "image/jpeg",
+				FileName: "contrato.bin",
+			},
+			wantMIME:      "application/pdf",
+			wantType:      "document",
+			wantExtension: ".pdf",
+		},
+		{
+			name: "docx preserves declared container mime",
+			attachment: mediaAttachment{
+				Data:     []byte{'P', 'K', 0x03, 0x04, 0x14, 0x00, 0x00, 0x00},
+				FileType: "document",
+				MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				FileName: "proposta",
+			},
+			wantMIME:      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			wantType:      "document",
+			wantExtension: ".docx",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeMediaAttachment(tt.attachment)
+			if got.MIMEType != tt.wantMIME {
+				t.Fatalf("unexpected mime: got %q want %q", got.MIMEType, tt.wantMIME)
+			}
+			if got.FileType != tt.wantType {
+				t.Fatalf("unexpected file type: got %q want %q", got.FileType, tt.wantType)
+			}
+			if !strings.HasSuffix(strings.ToLower(got.FileName), tt.wantExtension) {
+				t.Fatalf("unexpected filename: got %q, expected extension %q", got.FileName, tt.wantExtension)
+			}
+		})
+	}
+}
+
+func TestChatwootMultipartSendsNormalizedAttachmentHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("failed to parse multipart: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		file, header, err := r.FormFile("attachments[]")
+		if err != nil {
+			t.Errorf("missing attachment: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		if !strings.HasSuffix(header.Filename, ".ogg") {
+			t.Errorf("unexpected filename: %q", header.Filename)
+		}
+		if got := header.Header.Get("Content-Type"); got != "audio/ogg" {
+			t.Errorf("unexpected part content type: %q", got)
+		}
+		if got := r.FormValue("file_type"); got != "audio" {
+			t.Errorf("unexpected chatwoot file type: %q", got)
+		}
+		if !strings.HasPrefix(string(data), "OggS") {
+			t.Errorf("unexpected attachment data")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	service := &chatwootService{httpClient: server.Client()}
+	err := service.chatwootRequestMultipart(
+		&model.ChatwootConfig{URL: server.URL, Token: "token"},
+		"/messages",
+		"",
+		"incoming",
+		"wa-in:AUDIO1",
+		mediaAttachment{
+			Data:     append([]byte("OggS\x00"), make([]byte, 32)...),
+			FileType: "audio",
+			MIMEType: "application/octet-stream",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMediaWithoutCaptionDoesNotCreateSyntheticText(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(append([]byte("OggS\x00"), make([]byte, 16)...))
+	tests := []struct {
+		name       string
+		messageKey string
+		mimeType   string
+		fileType   string
+	}{
+		{name: "audio", messageKey: "audioMessage", mimeType: "audio/ogg; codecs=opus", fileType: "audio"},
+		{name: "image", messageKey: "imageMessage", mimeType: "image/jpeg", fileType: "image"},
+		{name: "sticker", messageKey: "stickerMessage", mimeType: "image/webp", fileType: "image"},
+	}
+
+	service := &chatwootService{httpClient: &http.Client{Timeout: time.Second}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message := map[string]interface{}{
+				"base64": encoded,
+				tt.messageKey: map[string]interface{}{
+					"mimetype": tt.mimeType,
+				},
+			}
+			content, attachment := service.extractContentAndMedia(message)
+			if content != "" {
+				t.Fatalf("unexpected synthetic content: %q", content)
+			}
+			if attachment.FileType != tt.fileType {
+				t.Fatalf("unexpected file type: got %q want %q", attachment.FileType, tt.fileType)
+			}
+		})
 	}
 }
 

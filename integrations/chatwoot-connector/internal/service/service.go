@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
 	"strconv"
@@ -135,11 +137,17 @@ type evolutionMessage struct {
 	RemoteJID       string
 	ContactName     string
 	Content         string
-	MediaType       string
-	Media           []byte
+	Media           mediaAttachment
 	MessageID       string
 	MessageSourceID string
 	FromMe          bool
+}
+
+type mediaAttachment struct {
+	Data     []byte
+	FileType string
+	MIMEType string
+	FileName string
 }
 
 type chatwootContactRef struct {
@@ -449,22 +457,20 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) {
 		messageType = "outgoing"
 	}
 
-	if strings.TrimSpace(message.Content) == "" {
-		if message.MediaType != "" {
-			message.Content = fmt.Sprintf("[%s]", message.MediaType)
-		} else {
-			message.Content = "[message]"
-		}
+	hasMedia := len(message.Media.Data) > 0 && message.Media.FileType != ""
+	if strings.TrimSpace(message.Content) == "" && !hasMedia {
+		message.Content = "[message]"
 	}
 
-	if len(message.Media) == 0 || message.MediaType == "" {
-		if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType, nil, ""); err != nil {
+	if !hasMedia {
+		message.Media = mediaAttachment{}
+		if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType); err != nil {
 			s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync message to Chatwoot: %v", instance.Id, err)
 		}
 		return
 	}
 
-	if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType, message.Media, message.MediaType); err != nil {
+	if err := s.syncEvolutionMessageWithBindingRefresh(instance, cfg, message, messageType); err != nil {
 		s.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to sync media message to Chatwoot: %v", instance.Id, err)
 	}
 }
@@ -474,15 +480,13 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 	cfg *chatwoot_model.ChatwootConfig,
 	message evolutionMessage,
 	messageType string,
-	media []byte,
-	mediaType string,
 ) error {
 	binding, err := s.getOrCreateBindingByRemote(instance, cfg, message.RemoteJID, message.ContactName, false)
 	if err != nil {
 		return fmt.Errorf("failed to resolve Chatwoot binding: %v", err)
 	}
 
-	err = s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, media, mediaType)
+	err = s.sendMessageToChatwoot(cfg, binding, message, messageType)
 	if !isChatwootNotFound(err) {
 		return err
 	}
@@ -494,7 +498,7 @@ func (s *chatwootService) syncEvolutionMessageWithBindingRefresh(
 		return fmt.Errorf("%v (failed to refresh Chatwoot binding: %v)", err, refreshErr)
 	}
 
-	return s.sendMessageToChatwoot(cfg, binding, message.Content, messageType, message.MessageSourceID, media, mediaType)
+	return s.sendMessageToChatwoot(cfg, binding, message, messageType)
 }
 
 func (s *chatwootService) getOrCreateBindingByRemote(instance *evolution.Instance, cfg *chatwoot_model.ChatwootConfig, remoteJID string, contactName string, forceRefresh bool) (*chatwoot_model.ChatwootBinding, error) {
@@ -800,28 +804,25 @@ func (s *chatwootService) createChatwootContactInbox(cfg *chatwoot_model.Chatwoo
 func (s *chatwootService) sendMessageToChatwoot(
 	cfg *chatwoot_model.ChatwootConfig,
 	binding *chatwoot_model.ChatwootBinding,
-	content string,
+	message evolutionMessage,
 	messageType string,
-	messageSourceID string,
-	media []byte,
-	mediaType string,
 ) error {
 	route := fmt.Sprintf("/api/v1/accounts/%s/conversations/%d/messages", cfg.AccountID, binding.ConversationID)
 
-	if len(media) == 0 {
+	if len(message.Media.Data) == 0 {
 		body := map[string]interface{}{
-			"content":      content,
+			"content":      message.Content,
 			"message_type": messageType,
 			"private":      false,
 		}
-		if strings.TrimSpace(messageSourceID) != "" {
-			body["source_id"] = messageSourceID
+		if strings.TrimSpace(message.MessageSourceID) != "" {
+			body["source_id"] = message.MessageSourceID
 		}
 		_, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, body)
 		return err
 	}
 
-	return s.chatwootRequestMultipart(cfg, route, content, messageType, messageSourceID, media, mediaType)
+	return s.chatwootRequestMultipart(cfg, route, message.Content, messageType, message.MessageSourceID, message.Media)
 }
 
 func (s *chatwootService) sendTextFromChatwoot(
@@ -1028,8 +1029,7 @@ func (s *chatwootService) chatwootRequestMultipart(
 	content string,
 	messageType string,
 	messageSourceID string,
-	media []byte,
-	mediaType string,
+	attachment mediaAttachment,
 ) error {
 	fullURL, err := joinChatwootURL(cfg.URL, route)
 	if err != nil {
@@ -1038,21 +1038,29 @@ func (s *chatwootService) chatwootRequestMultipart(
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
+	attachment = normalizeMediaAttachment(attachment)
 
-	_ = writer.WriteField("content", content)
+	if strings.TrimSpace(content) != "" {
+		_ = writer.WriteField("content", content)
+	}
 	_ = writer.WriteField("message_type", messageType)
 	_ = writer.WriteField("private", "false")
-	_ = writer.WriteField("file_type", mediaType)
+	_ = writer.WriteField("file_type", attachment.FileType)
 	if strings.TrimSpace(messageSourceID) != "" {
 		_ = writer.WriteField("source_id", messageSourceID)
 	}
 
-	fileName := fmt.Sprintf("attachment-%d", time.Now().UnixNano())
-	part, err := writer.CreateFormFile("attachments[]", fileName)
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     "attachments[]",
+		"filename": attachment.FileName,
+	}))
+	partHeader.Set("Content-Type", attachment.MIMEType)
+	part, err := writer.CreatePart(partHeader)
 	if err != nil {
 		return err
 	}
-	if _, err := part.Write(media); err != nil {
+	if _, err := part.Write(attachment.Data); err != nil {
 		return err
 	}
 	if err := writer.Close(); err != nil {
@@ -1086,7 +1094,7 @@ func (s *chatwootService) chatwootRequestMultipart(
 		}
 
 		// Fallback when attachment upload fails: keep text sync and preserve media metadata.
-		fallbackContent := fmt.Sprintf("%s\n[attachment:%s upload_failed]", content, mediaType)
+		fallbackContent := fmt.Sprintf("%s\n[attachment:%s upload_failed]", content, attachment.FileType)
 		fallbackBody := map[string]interface{}{
 			"content":      fallbackContent,
 			"message_type": messageType,
@@ -1131,7 +1139,7 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 		messageID = "event-" + stablePayloadHash(rawPayload, 16)
 	}
 
-	content, mediaType, media := s.extractContentAndMedia(messageMap)
+	content, media := s.extractContentAndMedia(messageMap)
 	sourcePrefix := "wa-in:"
 	if fromMe {
 		sourcePrefix = "wa-out:"
@@ -1147,7 +1155,6 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 		RemoteJID:       remoteJID,
 		ContactName:     contactName,
 		Content:         content,
-		MediaType:       mediaType,
 		Media:           media,
 		MessageID:       messageID,
 		MessageSourceID: sourcePrefix + messageID,
@@ -1155,16 +1162,16 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 	}, true
 }
 
-func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface{}) (string, string, []byte) {
+func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface{}) (string, mediaAttachment) {
 	if len(messageMap) == 0 {
-		return "[message]", "", nil
+		return "[message]", mediaAttachment{}
 	}
 
 	if conversation := strings.TrimSpace(mapString(messageMap, "conversation", "Conversation")); conversation != "" {
-		return conversation, "", nil
+		return conversation, mediaAttachment{}
 	}
 	if ext := mapFromAny(mapLookup(messageMap, "extendedTextMessage", "ExtendedTextMessage")); ext != nil {
-		return mapString(ext, "text", "Text"), "", nil
+		return mapString(ext, "text", "Text"), mediaAttachment{}
 	}
 	if child := mapFromAny(mapLookup(messageMap, "documentWithCaptionMessage", "DocumentWithCaptionMessage")); child != nil {
 		if nested := mapFromAny(mapLookup(child, "message", "Message")); nested != nil {
@@ -1173,37 +1180,33 @@ func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface
 	}
 
 	if img := mapFromAny(mapLookup(messageMap, "imageMessage", "ImageMessage")); img != nil {
-		media, mediaType := s.extractWebhookMedia(messageMap, img, "image")
-		return mapString(img, "caption", "Caption"), mediaType, media
+		return mapString(img, "caption", "Caption"), s.extractWebhookMedia(messageMap, img, "image")
 	}
 	if video := mapFromAny(mapLookup(messageMap, "videoMessage", "VideoMessage")); video != nil {
-		media, mediaType := s.extractWebhookMedia(messageMap, video, "video")
-		return mapString(video, "caption", "Caption"), mediaType, media
+		return mapString(video, "caption", "Caption"), s.extractWebhookMedia(messageMap, video, "video")
 	}
 	if audio := mapFromAny(mapLookup(messageMap, "audioMessage", "AudioMessage")); audio != nil {
-		media, mediaType := s.extractWebhookMedia(messageMap, audio, "audio")
-		return "[audio]", mediaType, media
+		return "", s.extractWebhookMedia(messageMap, audio, "audio")
 	}
 	if doc := mapFromAny(mapLookup(messageMap, "documentMessage", "DocumentMessage")); doc != nil {
-		media, mediaType := s.extractWebhookMedia(messageMap, doc, "document")
+		media := s.extractWebhookMedia(messageMap, doc, "document")
 		content := firstNonEmptyString(
 			mapString(doc, "caption", "Caption"),
 			mapString(doc, "title", "Title"),
 			mapString(doc, "fileName", "FileName", "filename"),
 		)
-		return content, mediaType, media
+		return content, media
 	}
 	if sticker := mapFromAny(mapLookup(messageMap, "stickerMessage", "StickerMessage")); sticker != nil {
-		media, mediaType := s.extractWebhookMedia(messageMap, sticker, "image")
-		return "[sticker]", mediaType, media
+		return "", s.extractWebhookMedia(messageMap, sticker, "image")
 	}
 
-	media, mediaType := s.extractWebhookMedia(messageMap, nil, "")
-	if len(media) > 0 || mediaType != "" {
-		return fmt.Sprintf("[%s]", firstNonEmptyString(mediaType, "media")), mediaType, media
+	media := s.extractWebhookMedia(messageMap, nil, "")
+	if len(media.Data) > 0 || media.FileType != "" {
+		return "", media
 	}
 
-	return "[message]", "", nil
+	return "[message]", mediaAttachment{}
 }
 
 func (s *chatwootService) resolveEvolutionRemoteJID(payload evolutionWebhookPayload, data map[string]interface{}, info map[string]interface{}) string {
@@ -1237,7 +1240,7 @@ func (s *chatwootService) resolveEvolutionRemoteJID(payload evolutionWebhookPayl
 	return remoteJID
 }
 
-func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, mediaMap map[string]interface{}, defaultType string) ([]byte, string) {
+func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, mediaMap map[string]interface{}, defaultType string) mediaAttachment {
 	mimeType := firstNonEmptyString(
 		mapString(root, "mimetype", "mimeType", "MimeType"),
 		mapString(mediaMap, "mimetype", "mimeType", "MimeType"),
@@ -1246,6 +1249,11 @@ func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, media
 	if mediaType == "" && mimeType != "" {
 		mediaType = normalizeChatwootFileType("", mimeType)
 	}
+	fileName := firstNonEmptyString(
+		mapString(mediaMap, "fileName", "FileName", "filename"),
+		mapString(root, "fileName", "FileName", "filename"),
+	)
+	attachment := mediaAttachment{FileType: mediaType, MIMEType: mimeType, FileName: fileName}
 
 	encoded := firstNonEmptyString(
 		mapString(root, "base64", "Base64"),
@@ -1255,22 +1263,27 @@ func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, media
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(encoded)), "data:") {
 			data, detectedMime, err := decodeDataURL(encoded)
 			if err == nil {
-				if mediaType == "" {
-					mediaType = normalizeChatwootFileType("", firstNonEmptyString(detectedMime, mimeType))
+				attachment.Data = data
+				if attachment.MIMEType == "" {
+					attachment.MIMEType = detectedMime
 				}
-				return data, mediaType
+				if attachment.FileType == "" {
+					attachment.FileType = normalizeChatwootFileType("", attachment.MIMEType)
+				}
+				return attachment
 			}
-			return nil, mediaType
+			return attachment
 		}
 
 		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
 		if err == nil {
-			if mediaType == "" {
-				mediaType = "document"
+			attachment.Data = data
+			if attachment.FileType == "" {
+				attachment.FileType = "document"
 			}
-			return data, mediaType
+			return attachment
 		}
-		return nil, mediaType
+		return attachment
 	}
 
 	mediaURL := firstNonEmptyString(
@@ -1278,17 +1291,21 @@ func (s *chatwootService) extractWebhookMedia(root map[string]interface{}, media
 		mapString(mediaMap, "mediaUrl", "mediaURL"),
 	)
 	if mediaURL == "" {
-		return nil, mediaType
+		return attachment
 	}
 
 	data, detectedMime, err := s.downloadAttachmentData(mediaURL)
 	if err != nil {
-		return nil, mediaType
+		return attachment
 	}
-	if mediaType == "" {
-		mediaType = normalizeChatwootFileType("", firstNonEmptyString(detectedMime, mimeType))
+	attachment.Data = data
+	if attachment.MIMEType == "" {
+		attachment.MIMEType = detectedMime
 	}
-	return data, mediaType
+	if attachment.FileType == "" {
+		attachment.FileType = normalizeChatwootFileType("", attachment.MIMEType)
+	}
+	return attachment
 }
 
 func shouldIgnoreJID(ignoreJIDsJSON string, remoteJID string) bool {
@@ -1793,6 +1810,211 @@ func normalizeChatwootFileType(fileType string, mimeType string) string {
 	default:
 		return "document"
 	}
+}
+
+func normalizeMediaAttachment(attachment mediaAttachment) mediaAttachment {
+	declaredMIME := canonicalMIMEType(attachment.MIMEType)
+	detectedMIME := ""
+	if len(attachment.Data) > 0 {
+		detectedMIME = canonicalMIMEType(http.DetectContentType(attachment.Data))
+	}
+
+	resolvedMIME := declaredMIME
+	if isGenericMIMEType(resolvedMIME) {
+		resolvedMIME = detectedMIME
+	} else if isStrongDetectedMIME(detectedMIME) && !mimeTypesCompatible(resolvedMIME, detectedMIME) {
+		resolvedMIME = detectedMIME
+	}
+	if resolvedMIME == "" {
+		resolvedMIME = "application/octet-stream"
+	}
+
+	// WhatsApp voice notes use an Ogg/Opus container. Go correctly detects the
+	// container as application/ogg, but Chatwoot needs audio/ogg to render its
+	// audio player instead of a generic downloadable document.
+	if detectedMIME == "application/ogg" && (attachment.FileType == "audio" || strings.HasPrefix(declaredMIME, "audio/")) {
+		resolvedMIME = "audio/ogg"
+	}
+	// MP4 is also the container used by M4A audio. Preserve the semantic audio
+	// type supplied by WhatsApp instead of classifying it as video from sniffing.
+	if detectedMIME == "video/mp4" && (attachment.FileType == "audio" || strings.HasPrefix(declaredMIME, "audio/")) {
+		resolvedMIME = "audio/mp4"
+	}
+
+	resolvedType := normalizeChatwootFileType("", resolvedMIME)
+	if isGenericMIMEType(resolvedMIME) && strings.TrimSpace(attachment.FileType) != "" {
+		resolvedType = normalizeChatwootFileType(attachment.FileType, resolvedMIME)
+	}
+
+	attachment.MIMEType = resolvedMIME
+	attachment.FileType = resolvedType
+	attachment.FileName = normalizeAttachmentFileName(attachment.FileName, resolvedMIME, resolvedType)
+	return attachment
+}
+
+func canonicalMIMEType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, _, err := mime.ParseMediaType(value)
+	if err == nil && parsed != "" {
+		return strings.ToLower(strings.TrimSpace(parsed))
+	}
+	if separator := strings.IndexByte(value, ';'); separator >= 0 {
+		value = value[:separator]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isGenericMIMEType(value string) bool {
+	switch canonicalMIMEType(value) {
+	case "", "application/octet-stream", "binary/octet-stream", "application/binary":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStrongDetectedMIME(value string) bool {
+	value = canonicalMIMEType(value)
+	return value != "" && value != "application/octet-stream" && value != "text/plain"
+}
+
+func mimeTypesCompatible(declared string, detected string) bool {
+	declared = canonicalMIMEType(declared)
+	detected = canonicalMIMEType(detected)
+	if declared == detected {
+		return true
+	}
+	if (declared == "audio/ogg" || declared == "video/ogg" || declared == "application/ogg") && detected == "application/ogg" {
+		return true
+	}
+	if (declared == "audio/mp4" || declared == "video/mp4") && detected == "video/mp4" {
+		return true
+	}
+	if strings.HasPrefix(declared, "application/vnd.openxmlformats-officedocument.") && detected == "application/zip" {
+		return true
+	}
+	declaredParts := strings.SplitN(declared, "/", 2)
+	detectedParts := strings.SplitN(detected, "/", 2)
+	return len(declaredParts) == 2 && len(detectedParts) == 2 && declaredParts[0] == detectedParts[0]
+}
+
+func normalizeAttachmentFileName(rawName string, mimeType string, fileType string) string {
+	name := strings.TrimSpace(strings.ReplaceAll(rawName, "\\", "/"))
+	name = path.Base(name)
+	name = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 || r == '"' {
+			return -1
+		}
+		return r
+	}, name)
+	if name == "" || name == "." || name == "/" {
+		base := normalizeChatwootFileType(fileType, mimeType)
+		if base == "document" {
+			base = "arquivo"
+		}
+		name = fmt.Sprintf("%s-%d", base, time.Now().UnixNano())
+	}
+
+	preferredExtension := preferredExtensionForMIME(mimeType, fileType)
+	if preferredExtension == "" {
+		return name
+	}
+	currentExtension := strings.ToLower(path.Ext(name))
+	if extensionMatchesMIME(currentExtension, mimeType) {
+		return name
+	}
+	if currentExtension != "" {
+		name = strings.TrimSuffix(name, path.Ext(name))
+	}
+	return strings.TrimRight(name, ". ") + preferredExtension
+}
+
+func preferredExtensionForMIME(mimeType string, fileType string) string {
+	switch canonicalMIMEType(mimeType) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/tiff":
+		return ".tiff"
+	case "audio/ogg", "application/ogg":
+		if fileType == "audio" || canonicalMIMEType(mimeType) == "audio/ogg" {
+			return ".ogg"
+		}
+		return ".ogx"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/mp4":
+		return ".m4a"
+	case "audio/aac":
+		return ".aac"
+	case "audio/wav", "audio/x-wav":
+		return ".wav"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "application/pdf":
+		return ".pdf"
+	case "application/zip":
+		return ".zip"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return ".docx"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return ".xlsx"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return ".pptx"
+	case "text/plain":
+		return ".txt"
+	case "text/csv":
+		return ".csv"
+	case "application/json":
+		return ".json"
+	case "application/octet-stream":
+		return ".bin"
+	}
+
+	extensions, err := mime.ExtensionsByType(canonicalMIMEType(mimeType))
+	if err == nil && len(extensions) > 0 {
+		return extensions[0]
+	}
+	return ""
+}
+
+func extensionMatchesMIME(extension string, mimeType string) bool {
+	extension = strings.ToLower(strings.TrimSpace(extension))
+	if extension == "" {
+		return false
+	}
+	preferred := preferredExtensionForMIME(mimeType, "")
+	if extension == preferred {
+		return true
+	}
+	switch canonicalMIMEType(mimeType) {
+	case "image/jpeg":
+		return extension == ".jpeg" || extension == ".jpe"
+	case "image/tiff":
+		return extension == ".tif"
+	case "audio/ogg":
+		return extension == ".oga"
+	}
+	extensions, err := mime.ExtensionsByType(canonicalMIMEType(mimeType))
+	if err != nil {
+		return false
+	}
+	for _, candidate := range extensions {
+		if extension == strings.ToLower(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeMimeType(mime string, fallback string) string {
