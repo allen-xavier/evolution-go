@@ -55,6 +55,16 @@ backoff de 5 segundos a 5 minutos, inclusive após reinício do container. Com
 `AMQP_GLOBAL_ENABLED=true`, a inicialização das sessões do WhatsApp também fica
 pausada até o RabbitMQ estar realmente disponível.
 
+O quinto patch corrige clientes desconectados que permanecem presos na memória.
+Os endpoints de conectar, reconectar e gerar QR reiniciam somente a instância
+afetada, removem QR antigo e preservam as demais sessões. O pareamento deixa de
+retornar sucesso falso quando o WebSocket não está conectado.
+
+O sexto patch torna `GET /instance/status` estritamente somente leitura. A
+consulta não cria cliente, não abre WebSocket e não reconecta uma instância.
+`Connected` continua representando o transporte WebSocket, enquanto `LoggedIn`
+continua representando a autenticação da sessão do WhatsApp.
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e

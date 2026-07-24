@@ -1,0 +1,56 @@
+diff --git a/pkg/instance/service/connection_lifecycle_test.go b/pkg/instance/service/connection_lifecycle_test.go
+--- a/pkg/instance/service/connection_lifecycle_test.go
++++ b/pkg/instance/service/connection_lifecycle_test.go
+@@ -1,6 +1,10 @@
+ package instance_service
+ 
+-import "testing"
++import (
++	"testing"
++
++	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
++)
+ 
+ func TestDecideClientConnectionAction(t *testing.T) {
+ 	tests := []struct {
+@@ -22,3 +26,19 @@ func TestDecideClientConnectionAction(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestStatusDoesNotStartMissingClient(t *testing.T) {
++	service := instances{}
++	instance := &instance_model.Instance{Id: "missing-runtime-client"}
++
++	status, err := service.Status(instance)
++	if err != nil {
++		t.Fatalf("expected a read-only status response, got error: %v", err)
++	}
++	if status.Connected {
++		t.Fatal("a missing runtime client must not be reported as websocket connected")
++	}
++	if status.LoggedIn {
++		t.Fatal("a missing runtime client must not be reported as logged in")
++	}
++}
+diff --git a/pkg/instance/service/instance_service.go b/pkg/instance/service/instance_service.go
+--- a/pkg/instance/service/instance_service.go
++++ b/pkg/instance/service/instance_service.go
+@@ -394,9 +394,14 @@ func (i instances) Logout(instance *instance_model.Instance) (*instance_model.In
+ }
+ 
+ func (i instances) Status(instance *instance_model.Instance) (*StatusStruct, error) {
+-	client, err := i.ensureClientConnected(instance.Id)
+-	if err != nil {
+-		return nil, err
++	// Status is intentionally read-only. A monitoring request must never
++	// create a client, open a websocket or reconnect an instance.
++	client := i.clientPointer[instance.Id]
++	if client == nil {
++		return &StatusStruct{
++			Connected: false,
++			LoggedIn:  false,
++		}, nil
+ 	}
+ 
+ 	isConnected := client.IsConnected()

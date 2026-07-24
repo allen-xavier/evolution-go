@@ -1,0 +1,190 @@
+diff --git a/pkg/instance/service/instance_service.go b/pkg/instance/service/instance_service.go
+--- a/pkg/instance/service/instance_service.go
++++ b/pkg/instance/service/instance_service.go
+@@ -114,6 +114,24 @@ type ForceReconnectStruct struct {
+ 	Number string `json:"number"`
+ }
+ 
++type clientConnectionAction uint8
++
++const (
++	clientConnectionStart clientConnectionAction = iota
++	clientConnectionReuse
++	clientConnectionRestart
++)
++
++func decideClientConnectionAction(clientExists, clientConnected bool) clientConnectionAction {
++	if !clientExists {
++		return clientConnectionStart
++	}
++	if clientConnected {
++		return clientConnectionReuse
++	}
++	return clientConnectionRestart
++}
++
+ func (i *instances) ensureClientConnected(instanceId string) (*whatsmeow.Client, error) {
+ 	logger := i.loggerWrapper.GetLogger(instanceId)
+ 	client := i.clientPointer[instanceId]
+@@ -234,20 +252,29 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
+ 	}
+ 
+ 	// Verifica se a instância já está rodando
+-	isInstanceRunning := i.clientPointer[instance.Id] != nil
++	client := i.clientPointer[instance.Id]
++	connectionAction := decideClientConnectionAction(client != nil, client != nil && client.IsConnected())
+ 
+ 	// Sincroniza as configurações na instância em execução (se já estiver conectada)
+ 	err = i.whatsmeowService.UpdateInstanceSettings(instance.Id)
+ 	if err != nil {
+ 		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Instance not in runtime yet, will be updated when connected", instance.Id)
+-		isInstanceRunning = false
+ 	} else {
+ 		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Instance settings updated successfully in runtime", instance.Id)
+-		isInstanceRunning = true
+ 	}
+ 
+ 	// Se a instância não estiver rodando, inicia uma nova
+-	if !isInstanceRunning {
++	i.whatsmeowService.SetReconnectTerminal(instance.Id, false)
++
++	switch connectionAction {
++	case clientConnectionRestart:
++		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Stale disconnected client found; restarting only this instance", instance.Id)
++		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
++			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to restart disconnected client: %v", instance.Id, err)
++			return nil, "", "", fmt.Errorf("failed to restart disconnected client: %w", err)
++		}
++		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Disconnected client restart requested successfully", instance.Id)
++	case clientConnectionStart:
+ 		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Starting new client instance", instance.Id)
+ 
+ 		i.killChannel[instance.Id] = make(chan bool)
+@@ -273,7 +300,7 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
+ 		}
+ 
+ 		go i.whatsmeowService.StartClient(clientData)
+-	} else {
++	case clientConnectionReuse:
+ 		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Instance already running, settings updated without restarting client", instance.Id)
+ 	}
+ 
+@@ -292,11 +319,8 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
+ }
+ 
+ func (i instances) Reconnect(instance *instance_model.Instance) error {
+-	_, err := i.ensureClientConnected(instance.Id)
+-	if err != nil {
+-		return err
+-	}
+-
++	// Reconnect must recover a missing or disconnected runtime client.
++	i.whatsmeowService.SetReconnectTerminal(instance.Id, false)
+ 	return i.whatsmeowService.ReconnectClient(instance.Id)
+ }
+ 
+@@ -400,12 +424,9 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
+ 	client := i.clientPointer[instance.Id]
+ 
+ 	// Se não há cliente ou o cliente está logado, precisamos iniciar um novo cliente
+-	if client == nil || client.IsLoggedIn() {
+-		if client != nil && client.IsLoggedIn() {
+-			logger.LogInfo("[%s] Client is logged in, starting new instance for QR code", instance.Id)
+-		} else {
+-			logger.LogInfo("[%s] No client found, starting new instance for QR code", instance.Id)
+-		}
++	if client == nil {
++		logger.LogInfo("[%s] No client found, starting new instance for QR code", instance.Id)
++		i.whatsmeowService.SetReconnectTerminal(instance.Id, false)
+ 
+ 		// Iniciar nova instância para gerar QR code
+ 		err := i.whatsmeowService.StartInstance(instance.Id)
+@@ -425,7 +446,21 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
+ 		}
+ 	} else if !client.IsConnected() {
+ 		// Se o cliente existe mas não está conectado, pode estar aguardando QR code
+-		logger.LogInfo("[%s] Client exists but not connected, checking for existing QR code", instance.Id)
++		logger.LogWarn("[%s] Stale disconnected client found while requesting QR; restarting only this instance", instance.Id)
++		i.whatsmeowService.SetReconnectTerminal(instance.Id, false)
++		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
++			logger.LogError("[%s] Failed to restart client for QR code: %v", instance.Id, err)
++			return nil, fmt.Errorf("failed to restart client for QR code: %w", err)
++		}
++
++		logger.LogInfo("[%s] Waiting for QR code after client restart...", instance.Id)
++		time.Sleep(3 * time.Second)
++		client = i.clientPointer[instance.Id]
++		if client != nil && client.IsLoggedIn() {
++			return nil, fmt.Errorf("session reconnected successfully; QR code is not required")
++		}
++	} else if client.IsLoggedIn() {
++		return nil, fmt.Errorf("session already logged in")
+ 	}
+ 
+ 	// Buscar instância atualizada do banco para pegar o QR code mais recente
+@@ -465,9 +500,21 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
+ }
+ 
+ func (i instances) Pair(data *PairStruct, instance *instance_model.Instance) (*PairReturnStruct, error) {
+-	code, err := i.clientPointer[instance.Id].PairPhone(context.Background(), data.Phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
++	client := i.clientPointer[instance.Id]
++	if client == nil {
++		return nil, fmt.Errorf("pairing unavailable: client is not running; connect the instance first")
++	}
++	if !client.IsConnected() {
++		return nil, fmt.Errorf("pairing unavailable: WhatsApp websocket is not connected")
++	}
++
++	code, err := client.PairPhone(context.Background(), data.Phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+ 	if err != nil {
+-		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] something went wrong calling pair phone", instance.Id)
++		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Pair phone failed: %v", instance.Id, err)
++		return nil, fmt.Errorf("failed to pair phone: %w", err)
++	}
++	if code == "" {
++		return nil, fmt.Errorf("failed to pair phone: WhatsApp returned an empty pairing code")
+ 	}
+ 
+ 	return &PairReturnStruct{PairingCode: code}, nil
+diff --git a/pkg/instance/service/connection_lifecycle_test.go b/pkg/instance/service/connection_lifecycle_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/instance/service/connection_lifecycle_test.go
+@@ -0,0 +1,24 @@
++package instance_service
++
++import "testing"
++
++func TestDecideClientConnectionAction(t *testing.T) {
++	tests := []struct {
++		name      string
++		exists    bool
++		connected bool
++		want      clientConnectionAction
++	}{
++		{name: "missing client starts a new runtime", exists: false, connected: false, want: clientConnectionStart},
++		{name: "connected client is reused", exists: true, connected: true, want: clientConnectionReuse},
++		{name: "disconnected client is restarted", exists: true, connected: false, want: clientConnectionRestart},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			if got := decideClientConnectionAction(test.exists, test.connected); got != test.want {
++				t.Fatalf("expected action %d, got %d", test.want, got)
++			}
++		})
++	}
++}
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -215,6 +215,9 @@ func (w whatsmeowService) ReconnectClient(instanceId string) error {
+ 	if err != nil {
+ 		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Failed to update disconnect status: %v", instanceId, err)
+ 	}
++	if err = w.instanceRepository.UpdateQrcode(instanceId, ""); err != nil {
++		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Failed to clear stale QR code during reconnect: %v", instanceId, err)
++	}
+ 
+ 	// Passo 4: Aguardar um pouco para garantir limpeza completa
+ 	time.Sleep(2 * time.Second)

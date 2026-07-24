@@ -24,7 +24,7 @@ PostgreSQL ou dois containers de RabbitMQ usando o mesmo volume ao mesmo tempo.
 Use estas imagens na stack da aplicação:
 
 ```text
-EVOLUTION_IMAGE=ghcr.io/allen-xavier/evolution-go:proxy-safety-v4-20260723
+EVOLUTION_IMAGE=ghcr.io/allen-xavier/evolution-go:proxy-safety-v6-20260724
 CONNECTOR_IMAGE=ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.4
 ```
 
