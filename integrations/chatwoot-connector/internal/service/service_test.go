@@ -59,6 +59,8 @@ type identityMemoryRepository struct {
 	deleted  []uint
 	jobs     map[uint]*model.ChatwootOutboundJob
 	nextJob  uint
+
+	resolveAliasHook func(instanceID string, aliasJID string) (string, error)
 }
 
 func identityKey(instanceID string, jid string) string {
@@ -118,6 +120,9 @@ func (r *identityMemoryRepository) SaveIdentityAlias(instanceID string, aliasJID
 }
 
 func (r *identityMemoryRepository) ResolveIdentityAlias(instanceID string, aliasJID string) (string, error) {
+	if r.resolveAliasHook != nil {
+		return r.resolveAliasHook(instanceID, aliasJID)
+	}
 	return r.aliases[identityKey(instanceID, aliasJID)], nil
 }
 
@@ -748,6 +753,186 @@ func TestCanonicalBindingRemovesDuplicateLIDBinding(t *testing.T) {
 	}
 	if len(repository.deleted) != 1 || repository.deleted[0] != duplicate.ID {
 		t.Fatalf("duplicate binding was not removed: %#v", repository.deleted)
+	}
+}
+
+func TestStabilizeLIDIdentityRechecksAliasAfterGracePeriod(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+	)
+	resolveCalls := 0
+	repository := &identityMemoryRepository{}
+	repository.resolveAliasHook = func(gotInstanceID string, gotLIDJID string) (string, error) {
+		resolveCalls++
+		if gotInstanceID != instanceID || gotLIDJID != lidJID || resolveCalls < 2 {
+			return "", nil
+		}
+		return phoneJID, nil
+	}
+	service := &chatwootService{
+		repository:     repository,
+		lidGracePeriod: time.Millisecond,
+	}
+	message := evolutionMessage{
+		RemoteJID:       lidJID,
+		IdentityAliases: []string{lidJID},
+	}
+
+	if err := service.stabilizeLIDIdentity(instanceID, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.RemoteJID != phoneJID {
+		t.Fatalf("stabilized remote jid = %s, want %s", message.RemoteJID, phoneJID)
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", resolveCalls)
+	}
+}
+
+func TestDuplicatePhoneIdentityMigratesProvisionalLIDBinding(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+		messageID  = "DUPLICATE-LID-1"
+	)
+	provisional := &model.ChatwootBinding{
+		ID:             7,
+		InstanceID:     instanceID,
+		RemoteJID:      lidJID,
+		ConversationID: 91,
+		SourceID:       chatwootSourceID(instanceID, lidJID),
+	}
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, lidJID): provisional,
+		},
+	}
+	service := NewChatwootService(repository, nil, nil, testLoggerManager()).(*chatwootService)
+	eventKey := instanceID + ":wa-in:" + messageID
+	if err := service.evolutionCache.Add(eventKey, true, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte(`{
+		"event": "Message",
+		"instanceId": "` + instanceID + `",
+		"data": {
+			"Info": {
+				"Chat": "` + phoneJID + `",
+				"Sender": "` + lidJID + `",
+				"SenderAlt": "` + phoneJID + `",
+				"ID": "` + messageID + `",
+				"IsFromMe": false
+			},
+			"Message": {
+				"conversation": "mensagem recebida"
+			}
+		}
+	}`)
+
+	if err := service.HandleEvolutionEvent(raw); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := repository.GetBindingByRemoteJID(instanceID, phoneJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding == nil || binding.ID != provisional.ID || binding.ConversationID != provisional.ConversationID {
+		t.Fatalf("provisional binding was not migrated: %#v", binding)
+	}
+	if old, _ := repository.GetBindingByRemoteJID(instanceID, lidJID); old != nil {
+		t.Fatalf("provisional LID key still exists: %#v", old)
+	}
+}
+
+func TestDuplicatePhoneIdentityReroutesToExistingCanonicalConversation(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		lidJID     = "90465080737994@lid"
+		phoneJID   = "5516991635281@s.whatsapp.net"
+		messageID  = "DUPLICATE-LID-2"
+	)
+	messagePosts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/accounts/1/conversations/100/messages" {
+			http.Error(w, "unexpected route", http.StatusNotFound)
+			return
+		}
+		messagePosts++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	canonical := &model.ChatwootBinding{
+		ID:             10,
+		InstanceID:     instanceID,
+		RemoteJID:      phoneJID,
+		ConversationID: 100,
+	}
+	provisional := &model.ChatwootBinding{
+		ID:             11,
+		InstanceID:     instanceID,
+		RemoteJID:      lidJID,
+		ConversationID: 101,
+	}
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+				URL:        server.URL,
+				AccountID:  "1",
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, phoneJID): canonical,
+			identityKey(instanceID, lidJID):   provisional,
+		},
+	}
+	service := NewChatwootService(repository, nil, nil, testLoggerManager()).(*chatwootService)
+	eventKey := instanceID + ":wa-in:" + messageID
+	if err := service.evolutionCache.Add(eventKey, true, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte(`{
+		"event": "Message",
+		"instanceId": "` + instanceID + `",
+		"data": {
+			"Info": {
+				"Chat": "` + phoneJID + `",
+				"Sender": "` + lidJID + `",
+				"SenderAlt": "` + phoneJID + `",
+				"ID": "` + messageID + `",
+				"IsFromMe": false
+			},
+			"Message": {
+				"conversation": "mensagem recebida"
+			}
+		}
+	}`)
+
+	if err := service.HandleEvolutionEvent(raw); err != nil {
+		t.Fatal(err)
+	}
+	if messagePosts != 1 {
+		t.Fatalf("canonical conversation message posts = %d, want 1", messagePosts)
+	}
+	if old, _ := repository.GetBindingByRemoteJID(instanceID, lidJID); old != nil {
+		t.Fatalf("provisional LID binding still exists: %#v", old)
+	}
+	if len(repository.deleted) != 1 || repository.deleted[0] != provisional.ID {
+		t.Fatalf("provisional binding was not removed: %#v", repository.deleted)
 	}
 }
 

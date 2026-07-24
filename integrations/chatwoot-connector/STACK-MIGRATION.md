@@ -25,7 +25,7 @@ Use estas imagens na stack da aplicação:
 
 ```text
 EVOLUTION_IMAGE=ghcr.io/allen-xavier/evolution-go:proxy-safety-v4-20260723
-CONNECTOR_IMAGE=ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.3
+CONNECTOR_IMAGE=ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.4
 ```
 
 Após a separação, atualizações normais devem ser feitas somente na stack de

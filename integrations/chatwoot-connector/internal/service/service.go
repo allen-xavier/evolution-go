@@ -42,6 +42,7 @@ const (
 	outboundInitialRetryDelay = 15 * time.Second
 	outboundMaximumRetryDelay = 5 * time.Minute
 	outboundWorkerBatchSize   = 20
+	lidIdentityGracePeriod    = 750 * time.Millisecond
 )
 
 type chatwootService struct {
@@ -52,6 +53,7 @@ type chatwootService struct {
 	skipCache       *cache.Cache
 	webhookCache    *cache.Cache
 	evolutionCache  *cache.Cache
+	lidGracePeriod  time.Duration
 	identityLocks   [256]sync.Mutex
 	loggerWrapper   *logger_wrapper.Manager
 }
@@ -622,12 +624,33 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) error 
 	if message.FromMe && s.shouldSkipOutgoingSync(instance.Id, message.MessageID) {
 		return nil
 	}
+	if err := s.stabilizeLIDIdentity(instance.Id, &message); err != nil {
+		return fmt.Errorf("stabilize WhatsApp identity for %s: %w", instance.Id, err)
+	}
 	if shouldIgnoreJID(cfg.IgnoreJids, message.RemoteJID) {
 		return nil
 	}
 
+	messageType := "incoming"
+	if message.FromMe {
+		messageType = "outgoing"
+	}
+
 	eventKey := fmt.Sprintf("%s:%s", instance.Id, message.MessageSourceID)
 	if err := s.evolutionCache.Add(eventKey, true, 24*time.Hour); err != nil {
+		reconciled, reconcileErr := s.reconcileDuplicateEvolutionIdentity(instance, cfg, message, messageType)
+		if reconcileErr != nil {
+			s.loggerWrapper.GetLogger(instance.Id).LogError(
+				"[%s] Failed to reconcile duplicated Evolution message %s: %v",
+				instance.Id,
+				message.MessageID,
+				reconcileErr,
+			)
+			return fmt.Errorf("reconcile duplicated WhatsApp message %s: %w", message.MessageID, reconcileErr)
+		}
+		if reconciled {
+			return nil
+		}
 		s.loggerWrapper.GetLogger(instance.Id).LogInfo(
 			"[%s] Skipping duplicated Evolution message: id=%s remote=%s",
 			instance.Id,
@@ -635,11 +658,6 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) error 
 			message.RemoteJID,
 		)
 		return nil
-	}
-
-	messageType := "incoming"
-	if message.FromMe {
-		messageType = "outgoing"
 	}
 
 	hasMedia := len(message.Media.Data) > 0 && message.Media.FileType != ""
@@ -665,6 +683,132 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) error 
 	}
 	s.logEvolutionSyncSuccess(instance.Id, message, messageType)
 	return nil
+}
+
+func (s *chatwootService) stabilizeLIDIdentity(instanceID string, message *evolutionMessage) error {
+	if message == nil || !isLIDRemoteJID(message.RemoteJID) {
+		return nil
+	}
+
+	lidJID := normalizeRemoteJID(message.RemoteJID)
+	resolve := func() (string, error) {
+		canonicalJID, err := s.repository.ResolveIdentityAlias(instanceID, lidJID)
+		if err != nil {
+			return "", err
+		}
+		if isPhoneRemoteJID(canonicalJID) {
+			return normalizeRemoteJID(canonicalJID), nil
+		}
+		if s.lidResolver == nil {
+			return "", nil
+		}
+		resolved, ok := s.lidResolver(instanceID, lidJID)
+		if !ok || !isPhoneRemoteJID(resolved) {
+			return "", nil
+		}
+		resolved = normalizeRemoteJID(resolved)
+		if err := s.repository.SaveIdentityAlias(instanceID, lidJID, resolved); err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+
+	canonicalJID, err := resolve()
+	if err != nil {
+		return err
+	}
+	if canonicalJID == "" && s.lidGracePeriod > 0 {
+		timer := time.NewTimer(s.lidGracePeriod)
+		<-timer.C
+		canonicalJID, err = resolve()
+		if err != nil {
+			return err
+		}
+	}
+	if canonicalJID == "" {
+		return nil
+	}
+
+	if !containsJID(message.IdentityAliases, lidJID) {
+		message.IdentityAliases = append(message.IdentityAliases, lidJID)
+	}
+	message.RemoteJID = canonicalJID
+	return nil
+}
+
+func (s *chatwootService) reconcileDuplicateEvolutionIdentity(
+	instance *evolution.Instance,
+	cfg *chatwoot_model.ChatwootConfig,
+	message evolutionMessage,
+	messageType string,
+) (bool, error) {
+	if instance == nil || !isPhoneRemoteJID(message.RemoteJID) {
+		return false, nil
+	}
+
+	aliases := uniqueLIDJIDs(message.IdentityAliases)
+	if len(aliases) == 0 {
+		return false, nil
+	}
+
+	provisional, err := s.findAliasBinding(instance.Id, aliases)
+	if err != nil {
+		return false, err
+	}
+	if provisional == nil {
+		return false, nil
+	}
+
+	canonical, err := s.repository.GetBindingByRemoteJID(instance.Id, message.RemoteJID)
+	if err != nil {
+		return false, err
+	}
+	contactRef := buildChatwootContactRef(instance.Id, message.RemoteJID, message.ContactName, cfg.MergeBrazilContacts)
+
+	if canonical == nil {
+		previousJID := provisional.RemoteJID
+		provisional.RemoteJID = message.RemoteJID
+		if err := s.repository.SaveBinding(provisional); err != nil {
+			return false, fmt.Errorf("migrate duplicated LID binding: %w", err)
+		}
+		s.updateMigratedChatwootContact(cfg, provisional, contactRef)
+		s.loggerWrapper.GetLogger(instance.Id).LogInfo(
+			"[%s] Reconciled duplicated Evolution message %s by migrating conversation %d from %s to %s",
+			instance.Id,
+			message.MessageID,
+			provisional.ConversationID,
+			previousJID,
+			message.RemoteJID,
+		)
+		return true, nil
+	}
+	if canonical.ID == provisional.ID {
+		return false, nil
+	}
+
+	if err := s.sendMessageToChatwoot(cfg, canonical, message, messageType); err != nil {
+		return false, fmt.Errorf("reroute duplicated message to canonical conversation %d: %w", canonical.ConversationID, err)
+	}
+	if err := s.repository.DeleteBinding(provisional); err != nil {
+		s.loggerWrapper.GetLogger(instance.Id).LogWarn(
+			"[%s] Duplicated Evolution message %s reached canonical conversation %d, but provisional LID binding %d could not be removed: %v",
+			instance.Id,
+			message.MessageID,
+			canonical.ConversationID,
+			provisional.ID,
+			err,
+		)
+		return true, nil
+	}
+	s.loggerWrapper.GetLogger(instance.Id).LogWarn(
+		"[%s] Rerouted duplicated Evolution message %s from provisional conversation %d to canonical conversation %d (%s)",
+		instance.Id,
+		message.MessageID,
+		provisional.ConversationID,
+		canonical.ConversationID,
+		message.RemoteJID,
+	)
+	return true, nil
 }
 
 func (s *chatwootService) lockMessageIdentity(instanceID string, message evolutionMessage) func() {
@@ -2556,6 +2700,7 @@ func NewChatwootService(
 		skipCache:      cache.New(10*time.Minute, 20*time.Minute),
 		webhookCache:   cache.New(24*time.Hour, 1*time.Hour),
 		evolutionCache: cache.New(24*time.Hour, 1*time.Hour),
+		lidGracePeriod: lidIdentityGracePeriod,
 		loggerWrapper:  loggerWrapper,
 	}
 
