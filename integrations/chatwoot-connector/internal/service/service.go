@@ -78,6 +78,11 @@ type chatwootConversationCreateResponse struct {
 	ID int `json:"id"`
 }
 
+type chatwootMessageCreateResponse struct {
+	ID       interface{} `json:"id"`
+	SourceID string      `json:"source_id"`
+}
+
 type chatwootContactSearchResponse struct {
 	Payload []struct {
 		ID             int    `json:"id"`
@@ -119,6 +124,7 @@ type chatwootWebhookPayload struct {
 	ID           interface{} `json:"id"`
 	Content      string      `json:"content"`
 	MessageType  string      `json:"message_type"`
+	SourceID     string      `json:"source_id"`
 	Private      bool        `json:"private"`
 	Conversation struct {
 		ID           int `json:"id"`
@@ -312,10 +318,19 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	if payload.MessageType != "outgoing" {
 		return nil
 	}
+	chatwootMessageID := webhookMessageID(payload.ID)
+	if isEvolutionMessageSourceID(payload.SourceID) {
+		s.loggerWrapper.GetLogger(instanceID).LogInfo(
+			"[%s] Skipping Chatwoot echo for mirrored WhatsApp message: message=%s source_id=%s",
+			instanceID,
+			chatwootMessageID,
+			payload.SourceID,
+		)
+		return nil
+	}
 	if payload.Sender.Type != "user" && payload.Sender.Type != "agent_bot" {
 		return nil
 	}
-	chatwootMessageID := webhookMessageID(payload.ID)
 	webhookKey := fmt.Sprintf("%s:%s", instanceID, chatwootMessageID)
 	if err := s.webhookCache.Add(webhookKey, true, 24*time.Hour); err != nil {
 		s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Skipping duplicated Chatwoot webhook message: %s", instanceID, chatwootMessageID)
@@ -1351,11 +1366,18 @@ func (s *chatwootService) sendMessageToChatwoot(
 		if strings.TrimSpace(message.MessageSourceID) != "" {
 			body["source_id"] = message.MessageSourceID
 		}
-		_, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, body)
+		respBody, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, body)
+		if err == nil {
+			s.rememberMirroredChatwootMessage(binding.InstanceID, message.MessageSourceID, respBody)
+		}
 		return err
 	}
 
-	return s.chatwootRequestMultipart(cfg, route, message.Content, messageType, message.MessageSourceID, message.Media)
+	respBody, err := s.chatwootRequestMultipart(cfg, route, message.Content, messageType, message.MessageSourceID, message.Media)
+	if err == nil {
+		s.rememberMirroredChatwootMessage(binding.InstanceID, message.MessageSourceID, respBody)
+	}
+	return err
 }
 
 func (s *chatwootService) sendTextFromChatwoot(
@@ -1563,10 +1585,10 @@ func (s *chatwootService) chatwootRequestMultipart(
 	messageType string,
 	messageSourceID string,
 	attachment mediaAttachment,
-) error {
+) ([]byte, error) {
 	fullURL, err := joinChatwootURL(cfg.URL, route)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	body := &bytes.Buffer{}
@@ -1591,36 +1613,36 @@ func (s *chatwootService) chatwootRequestMultipart(
 	partHeader.Set("Content-Type", attachment.MIMEType)
 	part, err := writer.CreatePart(partHeader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := part.Write(attachment.Data); err != nil {
-		return err
+		return nil, err
 	}
 	if err := writer.Close(); err != nil {
-		return err
+		return nil, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fullURL, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("api_access_token", cfg.Token)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusNotFound {
-			return &chatwootHTTPError{
+			return nil, &chatwootHTTPError{
 				StatusCode: resp.StatusCode,
 				Body:       string(respBody),
 			}
@@ -1636,13 +1658,14 @@ func (s *chatwootService) chatwootRequestMultipart(
 		if strings.TrimSpace(messageSourceID) != "" {
 			fallbackBody["source_id"] = messageSourceID
 		}
-		_, fallbackErr := s.chatwootRequestJSON(http.MethodPost, cfg, route, fallbackBody)
+		fallbackRespBody, fallbackErr := s.chatwootRequestJSON(http.MethodPost, cfg, route, fallbackBody)
 		if fallbackErr != nil {
-			return fmt.Errorf("chatwoot multipart failed [%d]: %s", resp.StatusCode, string(respBody))
+			return nil, fmt.Errorf("chatwoot multipart failed [%d]: %s", resp.StatusCode, string(respBody))
 		}
+		return fallbackRespBody, nil
 	}
 
-	return nil
+	return respBody, nil
 }
 
 func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayload, rawPayload []byte) (evolutionMessage, bool) {
@@ -1653,6 +1676,9 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 
 	info := mapFromAny(mapLookup(data, "Info", "info"))
 	messageMap := mapFromAny(mapLookup(data, "Message", "message"))
+	if isWhatsAppProtocolMessage(messageMap) {
+		return evolutionMessage{}, false
+	}
 
 	remoteJID := s.resolveEvolutionRemoteJID(payload, data, info)
 	if remoteJID == "" {
@@ -1782,6 +1808,31 @@ func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface
 	}
 
 	return "[message]", mediaAttachment{}
+}
+
+func isWhatsAppProtocolMessage(messageMap map[string]interface{}) bool {
+	return mapLookup(messageMap, "protocolMessage", "ProtocolMessage") != nil
+}
+
+func isEvolutionMessageSourceID(sourceID string) bool {
+	sourceID = strings.ToLower(strings.TrimSpace(sourceID))
+	return strings.HasPrefix(sourceID, "wa-in:") || strings.HasPrefix(sourceID, "wa-out:")
+}
+
+func (s *chatwootService) rememberMirroredChatwootMessage(instanceID string, sourceID string, responseBody []byte) {
+	if s.webhookCache == nil || !isEvolutionMessageSourceID(sourceID) || len(responseBody) == 0 {
+		return
+	}
+
+	var response chatwootMessageCreateResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return
+	}
+	messageID := webhookMessageID(response.ID)
+	if messageID == "unknown" {
+		return
+	}
+	s.webhookCache.Set(fmt.Sprintf("%s:%s", instanceID, messageID), true, 24*time.Hour)
 }
 
 func (s *chatwootService) resolveEvolutionRemoteJID(payload evolutionWebhookPayload, data map[string]interface{}, info map[string]interface{}) string {

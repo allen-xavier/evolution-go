@@ -214,6 +214,52 @@ func TestExtractEvolutionTextMessage(t *testing.T) {
 	}
 }
 
+func TestExtractEvolutionProtocolMessagesAreIgnored(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	tests := []struct {
+		name            string
+		protocolMessage string
+	}{
+		{
+			name:            "revoke",
+			protocolMessage: `{"type":"REVOKE","key":{"id":"ORIGINAL-1"}}`,
+		},
+		{
+			name:            "edit protocol wrapper",
+			protocolMessage: `{"type":"MESSAGE_EDIT","editedMessage":{"conversation":"texto corrigido"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"event": "Message",
+				"data": {
+					"Info": {
+						"Chat": "553193291010@s.whatsapp.net",
+						"ID": "PROTOCOL-1",
+						"IsFromMe": true
+					},
+					"Message": {
+						"protocolMessage": ` + tt.protocolMessage + `
+					}
+				}
+			}`)
+
+			var payload evolutionWebhookPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if message, ok := service.extractEvolutionMessage(payload, raw); ok {
+				t.Fatalf("protocol message must not be synchronized as a visible Chatwoot message: %#v", message)
+			}
+		})
+	}
+}
+
 func TestExtractEvolutionUnavailableMessage(t *testing.T) {
 	service := &chatwootService{
 		httpClient: &http.Client{Timeout: time.Second},
@@ -400,7 +446,7 @@ func TestChatwootMultipartSendsNormalizedAttachmentHeaders(t *testing.T) {
 	defer server.Close()
 
 	service := &chatwootService{httpClient: server.Client()}
-	err := service.chatwootRequestMultipart(
+	_, err := service.chatwootRequestMultipart(
 		&model.ChatwootConfig{URL: server.URL, Token: "token"},
 		"/messages",
 		"",
@@ -997,6 +1043,128 @@ func TestFailedChatwootSendIsPersistedAndRetried(t *testing.T) {
 	}
 	if evolutionAPI.textCalls != 2 {
 		t.Fatalf("expected initial send and durable retry, got %d calls", evolutionAPI.textCalls)
+	}
+}
+
+func TestHandleWebhookSkipsMirroredWhatsAppOutgoingMessage(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "553193291010@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+				InboxID:    7,
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID:             1,
+				InstanceID:     instanceID,
+				RemoteJID:      remoteJID,
+				ConversationID: 91,
+			},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+
+	body := []byte(`{
+		"event": "message_created",
+		"id": 251579,
+		"source_id": "wa-out:A522D10EBEB062D3F238E6585206B9D6",
+		"content": "oi",
+		"message_type": "outgoing",
+		"private": false,
+		"conversation": {
+			"id": 91,
+			"inbox_id": 7,
+			"contact_inbox": {"source_id": "unused"}
+		},
+		"sender": {"type": "user", "name": "API"}
+	}`)
+
+	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
+		t.Fatal(err)
+	}
+	if evolutionAPI.textCalls != 0 {
+		t.Fatalf("mirrored WhatsApp message was sent back to WhatsApp %d times", evolutionAPI.textCalls)
+	}
+	if len(repository.jobs) != 0 {
+		t.Fatalf("mirrored WhatsApp message must not create a durable outbound job: %#v", repository.jobs)
+	}
+}
+
+func TestMirroredChatwootResponseIDStopsEchoWhenWebhookOmitsSourceID(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "553193291010@s.whatsapp.net"
+	)
+	chatwootServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/accounts/1/conversations/91/messages" {
+			http.Error(w, "unexpected route", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":251579,"source_id":"wa-out:ORIGINAL-1"}`)
+	}))
+	defer chatwootServer.Close()
+
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+				InboxID:    7,
+				AccountID:  "1",
+				URL:        chatwootServer.URL,
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID:             1,
+				InstanceID:     instanceID,
+				RemoteJID:      remoteJID,
+				ConversationID: 91,
+			},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+	binding := repository.bindings[identityKey(instanceID, remoteJID)]
+	if err := service.sendMessageToChatwoot(
+		repository.configs[instanceID],
+		binding,
+		evolutionMessage{
+			Content:         "oi",
+			MessageSourceID: "wa-out:ORIGINAL-1",
+		},
+		"outgoing",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{
+		"event": "message_created",
+		"id": 251579,
+		"content": "oi",
+		"message_type": "outgoing",
+		"private": false,
+		"conversation": {
+			"id": 91,
+			"inbox_id": 7,
+			"contact_inbox": {"source_id": "unused"}
+		},
+		"sender": {"type": "user", "name": "API"}
+	}`)
+
+	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
+		t.Fatal(err)
+	}
+	if evolutionAPI.textCalls != 0 {
+		t.Fatalf("remembered mirrored message was sent back to WhatsApp %d times", evolutionAPI.textCalls)
 	}
 }
 

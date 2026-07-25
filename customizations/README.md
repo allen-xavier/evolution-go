@@ -65,6 +65,12 @@ consulta não cria cliente, não abre WebSocket e não reconecta uma instância.
 `Connected` continua representando o transporte WebSocket, enquanto `LoggedIn`
 continua representando a autenticação da sessão do WhatsApp.
 
+O sétimo patch isola cada geração do cliente e serializa o ciclo de vida por
+instância. Uma reconexão aguarda a geração anterior terminar, só retorna sucesso
+quando o WebSocket e o handler de eventos estão ativos e impede que uma goroutine
+antiga apague a sessão nova. Falhas consecutivas de keepalive e `StreamReplaced`
+passam a recuperar somente a instância afetada.
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
