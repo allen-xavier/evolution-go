@@ -42,20 +42,23 @@ const (
 	outboundInitialRetryDelay = 15 * time.Second
 	outboundMaximumRetryDelay = 5 * time.Minute
 	outboundWorkerBatchSize   = 20
-	lidIdentityGracePeriod    = 750 * time.Millisecond
+	lidIdentityGracePeriod    = 5 * time.Second
+	lidIdentityPollInterval   = 100 * time.Millisecond
 )
 
 type chatwootService struct {
-	repository      chatwoot_repository.ChatwootRepository
-	evolutionClient evolution.API
-	lidResolver     func(instanceID string, lidJID string) (string, bool)
-	httpClient      *http.Client
-	skipCache       *cache.Cache
-	webhookCache    *cache.Cache
-	evolutionCache  *cache.Cache
-	lidGracePeriod  time.Duration
-	identityLocks   [256]sync.Mutex
-	loggerWrapper   *logger_wrapper.Manager
+	repository       chatwoot_repository.ChatwootRepository
+	evolutionClient  evolution.API
+	lidResolver      func(instanceID string, lidJID string) (string, bool)
+	httpClient       *http.Client
+	skipCache        *cache.Cache
+	webhookCache     *cache.Cache
+	evolutionCache   *cache.Cache
+	contactSyncCache *cache.Cache
+	lidGracePeriod   time.Duration
+	lidPollInterval  time.Duration
+	identityLocks    [256]sync.Mutex
+	loggerWrapper    *logger_wrapper.Manager
 }
 
 type chatwootEvent struct {
@@ -733,11 +736,31 @@ func (s *chatwootService) stabilizeLIDIdentity(instanceID string, message *evolu
 		return err
 	}
 	if canonicalJID == "" && s.lidGracePeriod > 0 {
-		timer := time.NewTimer(s.lidGracePeriod)
-		<-timer.C
-		canonicalJID, err = resolve()
-		if err != nil {
-			return err
+		deadline := time.NewTimer(s.lidGracePeriod)
+		pollInterval := s.lidPollInterval
+		if pollInterval <= 0 {
+			pollInterval = lidIdentityPollInterval
+		}
+		if pollInterval >= s.lidGracePeriod {
+			pollInterval = s.lidGracePeriod / 2
+			if pollInterval <= 0 {
+				pollInterval = time.Nanosecond
+			}
+		}
+		poll := time.NewTicker(pollInterval)
+		defer deadline.Stop()
+		defer poll.Stop()
+
+		for canonicalJID == "" {
+			select {
+			case <-poll.C:
+				canonicalJID, err = resolve()
+				if err != nil {
+					return err
+				}
+			case <-deadline.C:
+				return nil
+			}
 		}
 	}
 	if canonicalJID == "" {
@@ -786,7 +809,7 @@ func (s *chatwootService) reconcileDuplicateEvolutionIdentity(
 		if err := s.repository.SaveBinding(provisional); err != nil {
 			return false, fmt.Errorf("migrate duplicated LID binding: %w", err)
 		}
-		s.updateMigratedChatwootContact(cfg, provisional, contactRef)
+		s.syncChatwootContactIdentity(cfg, provisional, contactRef)
 		s.loggerWrapper.GetLogger(instance.Id).LogInfo(
 			"[%s] Reconciled duplicated Evolution message %s by migrating conversation %d from %s to %s",
 			instance.Id,
@@ -887,6 +910,9 @@ func (s *chatwootService) getOrCreateBindingByRemote(
 		if err := s.removeDuplicateAliasBindings(instance.Id, binding, identityAliases); err != nil {
 			return nil, err
 		}
+		if isPhoneRemoteJID(remoteJID) {
+			s.syncChatwootContactIdentity(cfg, binding, contactRef)
+		}
 		return binding, nil
 	}
 
@@ -908,7 +934,7 @@ func (s *chatwootService) getOrCreateBindingByRemote(
 				previousJID,
 				remoteJID,
 			)
-			s.updateMigratedChatwootContact(cfg, provisional, contactRef)
+			s.syncChatwootContactIdentity(cfg, provisional, contactRef)
 			return provisional, nil
 		}
 	}
@@ -1025,7 +1051,7 @@ func (s *chatwootService) removeDuplicateAliasBindings(
 	return nil
 }
 
-func (s *chatwootService) updateMigratedChatwootContact(
+func (s *chatwootService) syncChatwootContactIdentity(
 	cfg *chatwoot_model.ChatwootConfig,
 	binding *chatwoot_model.ChatwootBinding,
 	contactRef chatwootContactRef,
@@ -1045,13 +1071,29 @@ func (s *chatwootService) updateMigratedChatwootContact(
 		return
 	}
 
+	cacheKey := fmt.Sprintf(
+		"%s:%d:%s:%s",
+		binding.InstanceID,
+		binding.ContactID,
+		strings.TrimSpace(contactRef.Phone),
+		strings.TrimSpace(contactRef.Name),
+	)
+	if s.contactSyncCache != nil {
+		if err := s.contactSyncCache.Add(cacheKey, true, 24*time.Hour); err != nil {
+			return
+		}
+	}
+
 	route := fmt.Sprintf("/api/v1/accounts/%s/contacts/%d", cfg.AccountID, binding.ContactID)
 	if _, err := s.chatwootRequestJSON(http.MethodPut, cfg, route, body); err != nil {
+		if s.contactSyncCache != nil {
+			s.contactSyncCache.Delete(cacheKey)
+		}
 		s.loggerWrapper.GetLogger(binding.InstanceID).LogWarn(
-			"[%s] Conversation %d was migrated from LID, but Chatwoot contact %d could not be updated: %v",
+			"[%s] Chatwoot contact %d for conversation %d could not be synchronized: %v",
 			binding.InstanceID,
-			binding.ConversationID,
 			binding.ContactID,
+			binding.ConversationID,
 			err,
 		)
 	}
@@ -2748,11 +2790,13 @@ func NewChatwootService(
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		skipCache:      cache.New(10*time.Minute, 20*time.Minute),
-		webhookCache:   cache.New(24*time.Hour, 1*time.Hour),
-		evolutionCache: cache.New(24*time.Hour, 1*time.Hour),
-		lidGracePeriod: lidIdentityGracePeriod,
-		loggerWrapper:  loggerWrapper,
+		skipCache:        cache.New(10*time.Minute, 20*time.Minute),
+		webhookCache:     cache.New(24*time.Hour, 1*time.Hour),
+		evolutionCache:   cache.New(24*time.Hour, 1*time.Hour),
+		contactSyncCache: cache.New(24*time.Hour, 1*time.Hour),
+		lidGracePeriod:   lidIdentityGracePeriod,
+		lidPollInterval:  lidIdentityPollInterval,
+		loggerWrapper:    loggerWrapper,
 	}
 
 	return service

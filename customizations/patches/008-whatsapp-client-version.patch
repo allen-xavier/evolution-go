@@ -1,0 +1,131 @@
+diff --git a/pkg/whatsmeow/service/client_version_test.go b/pkg/whatsmeow/service/client_version_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/whatsmeow/service/client_version_test.go
+@@ -0,0 +1,50 @@
++package whatsmeow_service
++
++import (
++	"testing"
++
++	"go.mau.fi/whatsmeow/store"
++)
++
++func TestApplyWhatsAppClientVersionUpdatesHandshakePayload(t *testing.T) {
++	original := store.GetWAVersion()
++	defer applyWhatsAppClientVersion(clientVersion{
++		Major: int(original[0]),
++		Minor: int(original[1]),
++		Patch: int(original[2]),
++	})
++
++	want := clientVersion{Major: 2, Minor: 3000, Patch: 1044006379}
++	if !applyWhatsAppClientVersion(want) {
++		t.Fatal("expected a valid version to be applied")
++	}
++
++	gotVersion := store.GetWAVersion()
++	if gotVersion != (store.WAVersionContainer{2, 3000, 1044006379}) {
++		t.Fatalf("store version = %s", gotVersion.String())
++	}
++
++	payloadVersion := store.BaseClientPayload.GetUserAgent().GetAppVersion()
++	if payloadVersion.GetPrimary() != uint32(want.Major) ||
++		payloadVersion.GetSecondary() != uint32(want.Minor) ||
++		payloadVersion.GetTertiary() != uint32(want.Patch) {
++		t.Fatalf(
++			"handshake payload version = %d.%d.%d",
++			payloadVersion.GetPrimary(),
++			payloadVersion.GetSecondary(),
++			payloadVersion.GetTertiary(),
++		)
++	}
++
++	deviceVersion := store.DeviceProps.GetVersion()
++	if deviceVersion.GetPrimary() != uint32(want.Major) ||
++		deviceVersion.GetSecondary() != uint32(want.Minor) ||
++		deviceVersion.GetTertiary() != uint32(want.Patch) {
++		t.Fatalf(
++			"device props version = %d.%d.%d",
++			deviceVersion.GetPrimary(),
++			deviceVersion.GetSecondary(),
++			deviceVersion.GetTertiary(),
++		)
++	}
++}
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -71,6 +71,34 @@ type clientVersion struct {
+ 	Patch int
+ }
+ 
++var whatsAppVersionMu sync.Mutex
++
++func applyWhatsAppClientVersion(version clientVersion) bool {
++	if version.Major <= 0 || version.Minor <= 0 || version.Patch <= 0 {
++		return false
++	}
++
++	waVersion := store.WAVersionContainer{
++		uint32(version.Major),
++		uint32(version.Minor),
++		uint32(version.Patch),
++	}
++
++	whatsAppVersionMu.Lock()
++	defer whatsAppVersionMu.Unlock()
++
++	store.SetWAVersion(waVersion)
++
++	// Backport tulir/whatsmeow a763037. The vendored library updates the
++	// version hash, but leaves the already-created handshake payload stale.
++	store.BaseClientPayload.UserAgent.AppVersion = waVersion.ProtoAppVersion()
++
++	store.DeviceProps.Version.Primary = proto.Uint32(waVersion[0])
++	store.DeviceProps.Version.Secondary = proto.Uint32(waVersion[1])
++	store.DeviceProps.Version.Tertiary = proto.Uint32(waVersion[2])
++	return true
++}
++
+ type whatsmeowService struct {
+ 	instanceRepository instance_repository.InstanceRepository
+ 	authDB             *sql.DB
+@@ -591,30 +619,25 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
+ 	if w.config.WhatsappVersionMajor != 0 && w.config.WhatsappVersionMinor != 0 && w.config.WhatsappVersionPatch != 0 {
+ 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version to %d.%d.%d", cd.Instance.Id, w.config.WhatsappVersionMajor, w.config.WhatsappVersionMinor, w.config.WhatsappVersionPatch)
+ 		version.Major = w.config.WhatsappVersionMajor
+-		if err == nil {
+-			store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
+-		}
+ 		version.Minor = w.config.WhatsappVersionMinor
+-		if err == nil {
+-			store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
+-		}
+ 		version.Patch = w.config.WhatsappVersionPatch
+-		if err == nil {
+-			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
+-		}
+ 	} else {
+ 		// Try to fetch version from WhatsApp Web
+ 		webVersion, err := fetchWhatsAppWebVersion()
+ 		if err != nil {
+ 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to fetch WhatsApp Web version: %v", cd.Instance.Id, err)
+ 		} else {
+ 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version from web to %d.%d.%d", cd.Instance.Id, webVersion.Major, webVersion.Minor, webVersion.Patch)
+ 			version = *webVersion
+-			store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
+-			store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
+-			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
+ 		}
+ 	}
++	if applyWhatsAppClientVersion(version) {
++		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo(
++			"[%s] WhatsApp handshake payload version applied: %s",
++			cd.Instance.Id,
++			store.GetWAVersion().String(),
++		)
++	}
+ 
+ 	// 🔒 FIX: Sempre criar logger, mesmo que WaDebug esteja vazio
+ 	// Usar "INFO" como nível mínimo para garantir que logs importantes apareçam

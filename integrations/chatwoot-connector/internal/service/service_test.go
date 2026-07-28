@@ -812,14 +812,15 @@ func TestStabilizeLIDIdentityRechecksAliasAfterGracePeriod(t *testing.T) {
 	repository := &identityMemoryRepository{}
 	repository.resolveAliasHook = func(gotInstanceID string, gotLIDJID string) (string, error) {
 		resolveCalls++
-		if gotInstanceID != instanceID || gotLIDJID != lidJID || resolveCalls < 2 {
+		if gotInstanceID != instanceID || gotLIDJID != lidJID || resolveCalls < 4 {
 			return "", nil
 		}
 		return phoneJID, nil
 	}
 	service := &chatwootService{
-		repository:     repository,
-		lidGracePeriod: time.Millisecond,
+		repository:      repository,
+		lidGracePeriod:  100 * time.Millisecond,
+		lidPollInterval: time.Millisecond,
 	}
 	message := evolutionMessage{
 		RemoteJID:       lidJID,
@@ -832,8 +833,78 @@ func TestStabilizeLIDIdentityRechecksAliasAfterGracePeriod(t *testing.T) {
 	if message.RemoteJID != phoneJID {
 		t.Fatalf("stabilized remote jid = %s, want %s", message.RemoteJID, phoneJID)
 	}
-	if resolveCalls != 2 {
-		t.Fatalf("resolver calls = %d, want 2", resolveCalls)
+	if resolveCalls != 4 {
+		t.Fatalf("resolver calls = %d, want 4", resolveCalls)
+	}
+}
+
+func TestExistingCanonicalContactIsUpdatedBeforeMessageWebhook(t *testing.T) {
+	const (
+		instanceID     = "4ddbca6b-d357-4d7b-9828-17d56f52963a"
+		phoneJID       = "447596281787@s.whatsapp.net"
+		contactID      = 15715
+		conversationID = 7729
+	)
+
+	requestOrder := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/accounts/1/contacts/15715":
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode contact update: %v", err)
+			}
+			if body["phone_number"] != "+447596281787" {
+				t.Fatalf("phone_number = %#v, want +447596281787", body["phone_number"])
+			}
+			requestOrder = append(requestOrder, "contact")
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/1/conversations/7729/messages":
+			requestOrder = append(requestOrder, "message")
+		default:
+			http.Error(w, "unexpected route", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	binding := &model.ChatwootBinding{
+		ID:             15,
+		InstanceID:     instanceID,
+		RemoteJID:      phoneJID,
+		ContactID:      contactID,
+		ConversationID: conversationID,
+	}
+	repository := &identityMemoryRepository{
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, phoneJID): binding,
+		},
+	}
+	service := NewChatwootService(repository, nil, nil, testLoggerManager()).(*chatwootService)
+	cfg := &model.ChatwootConfig{
+		InstanceID: instanceID,
+		URL:        server.URL,
+		AccountID:  "1",
+	}
+	message := evolutionMessage{
+		RemoteJID:       phoneJID,
+		ContactName:     "Cliente",
+		Content:         "Bom dia!",
+		MessageID:       "ACDAB5F65BD093CE2AA7530AE32A3355",
+		MessageSourceID: "wa-in:ACDAB5F65BD093CE2AA7530AE32A3355",
+	}
+
+	if err := service.syncEvolutionMessageWithBindingRefresh(
+		&evolution.Instance{Id: instanceID},
+		cfg,
+		message,
+		"incoming",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(requestOrder) != 2 || requestOrder[0] != "contact" || requestOrder[1] != "message" {
+		t.Fatalf("request order = %#v, want [contact message]", requestOrder)
 	}
 }
 
