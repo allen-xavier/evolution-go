@@ -72,6 +72,7 @@ func (f *fakeEvolution) DisconnectInstance(_ context.Context, instanceID string)
 	f.disconnectedIDs = append(f.disconnectedIDs, instanceID)
 	return nil
 }
+func (*fakeEvolution) ReconnectInstance(context.Context, string) error { return nil }
 
 type monitorRepository struct {
 	configs []InstanceProxy

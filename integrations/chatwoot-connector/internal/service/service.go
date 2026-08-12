@@ -42,23 +42,37 @@ const (
 	outboundInitialRetryDelay = 15 * time.Second
 	outboundMaximumRetryDelay = 5 * time.Minute
 	outboundWorkerBatchSize   = 20
+	// At the five-minute cap, 288 attempts retain transient failures for
+	// approximately 24 hours without allowing an unbounded retry loop.
+	outboundMaximumAttempts   = 288
+	outboundRecoveryThreshold = 2
+	outboundRecoveryWindow    = 2 * time.Minute
+	outboundRecoveryCooldown  = 10 * time.Minute
 	lidIdentityGracePeriod    = 5 * time.Second
 	lidIdentityPollInterval   = 100 * time.Millisecond
 )
 
 type chatwootService struct {
-	repository       chatwoot_repository.ChatwootRepository
-	evolutionClient  evolution.API
-	lidResolver      func(instanceID string, lidJID string) (string, bool)
-	httpClient       *http.Client
-	skipCache        *cache.Cache
-	webhookCache     *cache.Cache
-	evolutionCache   *cache.Cache
-	contactSyncCache *cache.Cache
-	lidGracePeriod   time.Duration
-	lidPollInterval  time.Duration
-	identityLocks    [256]sync.Mutex
-	loggerWrapper    *logger_wrapper.Manager
+	repository         chatwoot_repository.ChatwootRepository
+	evolutionClient    evolution.API
+	lidResolver        func(instanceID string, lidJID string) (string, bool)
+	httpClient         *http.Client
+	skipCache          *cache.Cache
+	webhookCache       *cache.Cache
+	evolutionCache     *cache.Cache
+	contactSyncCache   *cache.Cache
+	lidGracePeriod     time.Duration
+	lidPollInterval    time.Duration
+	identityLocks      [256]sync.Mutex
+	outboundRecoveryMu sync.Mutex
+	outboundRecovery   map[string]outboundRecoveryState
+	loggerWrapper      *logger_wrapper.Manager
+}
+
+type outboundRecoveryState struct {
+	failures      int
+	lastFailure   time.Time
+	lastReconnect time.Time
 }
 
 type chatwootEvent struct {
@@ -341,16 +355,32 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 	}
 
 	if err := s.deliverChatwootPayload(instanceID, cfg, payload); err != nil {
+		now := time.Now()
 		job := &chatwoot_model.ChatwootOutboundJob{
 			InstanceID:        instanceID,
 			ChatwootMessageID: chatwootMessageID,
 			Payload:           append([]byte(nil), body...),
-			NextAttemptAt:     time.Now().Add(outboundInitialRetryDelay),
+			NextAttemptAt:     now.Add(outboundInitialRetryDelay),
 			LastError:         truncateText(err.Error(), 4000),
+		}
+		if isPermanentOutboundError(err) {
+			job.Attempts = 1
+			job.FailedAt = &now
+		} else {
+			s.maybeRecoverOutboundSession(instanceID, err)
 		}
 		if queueErr := s.repository.EnqueueOutboundJob(job); queueErr != nil {
 			s.webhookCache.Delete(webhookKey)
 			return fmt.Errorf("deliver Chatwoot message %s: %v (persist retry job: %w)", chatwootMessageID, err, queueErr)
+		}
+		if job.FailedAt != nil {
+			s.loggerWrapper.GetLogger(instanceID).LogError(
+				"[%s] Chatwoot message %s recorded as a terminal delivery failure: %v",
+				instanceID,
+				chatwootMessageID,
+				err,
+			)
+			return nil
 		}
 		s.loggerWrapper.GetLogger(instanceID).LogWarn(
 			"[%s] Chatwoot message %s persisted for retry after delivery failure: %v",
@@ -360,6 +390,7 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		)
 		return nil
 	}
+	s.clearOutboundRecovery(instanceID)
 
 	return nil
 }
@@ -474,35 +505,42 @@ func (s *chatwootService) processDueOutboundJobs(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.processOutboundJob(&jobs[index])
+		if s.processOutboundJob(&jobs[index]) {
+			// Let the instance finish reconnecting before processing more queued
+			// messages. The worker will pick them up on its next tick.
+			break
+		}
 	}
 }
 
-func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboundJob) {
+// processOutboundJob reports whether it initiated a session reconnect.
+func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboundJob) bool {
 	if job == nil {
-		return
+		return false
 	}
 
 	var payload chatwootWebhookPayload
 	if err := json.Unmarshal(job.Payload, &payload); err != nil {
-		s.rescheduleOutboundJob(job, fmt.Errorf("invalid stored Chatwoot webhook: %w", err))
-		return
+		s.failOutboundJob(job, fmt.Errorf("invalid stored Chatwoot webhook: %w", err))
+		return false
 	}
 
 	cfg, err := s.repository.GetConfig(job.InstanceID)
 	if err != nil {
 		s.rescheduleOutboundJob(job, fmt.Errorf("load Chatwoot config: %w", err))
-		return
+		return false
 	}
 	if cfg == nil || !cfg.Enabled {
 		s.rescheduleOutboundJob(job, errors.New("Chatwoot integration is disabled"))
-		return
+		return false
 	}
 
 	if err := s.deliverChatwootPayload(job.InstanceID, cfg, payload); err != nil {
+		reconnected := s.maybeRecoverOutboundSession(job.InstanceID, err)
 		s.rescheduleOutboundJob(job, err)
-		return
+		return reconnected
 	}
+	s.clearOutboundRecovery(job.InstanceID)
 
 	if err := s.repository.DeleteOutboundJob(job); err != nil {
 		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
@@ -511,7 +549,7 @@ func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboun
 			job.ChatwootMessageID,
 			err,
 		)
-		return
+		return false
 	}
 	s.loggerWrapper.GetLogger(job.InstanceID).LogInfo(
 		"[%s] Durable Chatwoot message %s delivered to WhatsApp after %d retries",
@@ -519,11 +557,17 @@ func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboun
 		job.ChatwootMessageID,
 		job.Attempts+1,
 	)
+	return false
 }
 
 func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) {
 	job.Attempts++
 	job.LastError = truncateText(deliveryErr.Error(), 4000)
+	if isPermanentOutboundError(deliveryErr) || job.Attempts >= outboundMaximumAttempts {
+		s.failOutboundJob(job, deliveryErr)
+		return
+	}
+	job.FailedAt = nil
 	job.NextAttemptAt = time.Now().Add(outboundRetryDelay(job.Attempts))
 	if err := s.repository.SaveOutboundJob(job); err != nil {
 		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
@@ -543,6 +587,101 @@ func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutb
 		job.NextAttemptAt.Format(time.RFC3339),
 		deliveryErr,
 	)
+}
+
+func (s *chatwootService) failOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) {
+	if job.Attempts == 0 {
+		job.Attempts = 1
+	}
+	now := time.Now()
+	job.FailedAt = &now
+	job.LastError = truncateText(deliveryErr.Error(), 4000)
+	if err := s.repository.SaveOutboundJob(job); err != nil {
+		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
+			"[%s] Failed to record terminal Chatwoot message %s: delivery_error=%v persistence_error=%v",
+			job.InstanceID,
+			job.ChatwootMessageID,
+			deliveryErr,
+			err,
+		)
+		return
+	}
+	s.loggerWrapper.GetLogger(job.InstanceID).LogError(
+		"[%s] Durable Chatwoot message %s stopped after %d attempts and was retained for audit: %v",
+		job.InstanceID,
+		job.ChatwootMessageID,
+		job.Attempts,
+		deliveryErr,
+	)
+}
+
+func isPermanentOutboundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not registered on whatsapp") ||
+		strings.Contains(message, "is not registered")
+}
+
+func isRecoverableSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "server returned error 400")
+}
+
+func (s *chatwootService) maybeRecoverOutboundSession(instanceID string, deliveryErr error) bool {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" || !isRecoverableSessionError(deliveryErr) {
+		return false
+	}
+
+	now := time.Now()
+	s.outboundRecoveryMu.Lock()
+	if s.outboundRecovery == nil {
+		s.outboundRecovery = map[string]outboundRecoveryState{}
+	}
+	state := s.outboundRecovery[instanceID]
+	if state.lastFailure.IsZero() || now.Sub(state.lastFailure) > outboundRecoveryWindow {
+		state.failures = 0
+	}
+	state.failures++
+	state.lastFailure = now
+	if state.failures < outboundRecoveryThreshold ||
+		(!state.lastReconnect.IsZero() && now.Sub(state.lastReconnect) < outboundRecoveryCooldown) {
+		s.outboundRecovery[instanceID] = state
+		s.outboundRecoveryMu.Unlock()
+		return false
+	}
+	state.failures = 0
+	state.lastReconnect = now
+	s.outboundRecovery[instanceID] = state
+	s.outboundRecoveryMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := s.evolutionClient.ReconnectInstance(ctx, instanceID); err != nil {
+		s.loggerWrapper.GetLogger(instanceID).LogError(
+			"[%s] Automatic WhatsApp session reconnect failed after repeated delivery errors: %v",
+			instanceID,
+			err,
+		)
+		return false
+	}
+	s.loggerWrapper.GetLogger(instanceID).LogWarn(
+		"[%s] Automatic WhatsApp session reconnect started after %d delivery errors returned server error 400",
+		instanceID,
+		outboundRecoveryThreshold,
+	)
+	return true
+}
+
+func (s *chatwootService) clearOutboundRecovery(instanceID string) {
+	s.outboundRecoveryMu.Lock()
+	delete(s.outboundRecovery, strings.TrimSpace(instanceID))
+	s.outboundRecoveryMu.Unlock()
 }
 
 func outboundRetryDelay(attempt int) time.Duration {
@@ -2794,6 +2933,7 @@ func NewChatwootService(
 		webhookCache:     cache.New(24*time.Hour, 1*time.Hour),
 		evolutionCache:   cache.New(24*time.Hour, 1*time.Hour),
 		contactSyncCache: cache.New(24*time.Hour, 1*time.Hour),
+		outboundRecovery: map[string]outboundRecoveryState{},
 		lidGracePeriod:   lidIdentityGracePeriod,
 		lidPollInterval:  lidIdentityPollInterval,
 		loggerWrapper:    loggerWrapper,

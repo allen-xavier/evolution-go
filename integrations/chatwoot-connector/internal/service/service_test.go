@@ -19,8 +19,10 @@ import (
 )
 
 type outboundFakeEvolution struct {
-	sendTextErr error
-	textCalls   int
+	sendTextErr    error
+	textCalls      int
+	reconnectErr   error
+	reconnectCalls int
 }
 
 func (f *outboundFakeEvolution) GetInstance(context.Context, string) (*evolution.Instance, error) {
@@ -50,6 +52,11 @@ func (*outboundFakeEvolution) RemoveProxy(context.Context, string) error {
 
 func (*outboundFakeEvolution) DisconnectInstance(context.Context, string) error {
 	return nil
+}
+
+func (f *outboundFakeEvolution) ReconnectInstance(context.Context, string) error {
+	f.reconnectCalls++
+	return f.reconnectErr
 }
 
 type identityMemoryRepository struct {
@@ -149,7 +156,7 @@ func (r *identityMemoryRepository) EnqueueOutboundJob(job *model.ChatwootOutboun
 func (r *identityMemoryRepository) ListDueOutboundJobs(now time.Time, limit int) ([]model.ChatwootOutboundJob, error) {
 	result := []model.ChatwootOutboundJob{}
 	for _, job := range r.jobs {
-		if !job.NextAttemptAt.After(now) {
+		if job.FailedAt == nil && !job.NextAttemptAt.After(now) {
 			result = append(result, *job)
 		}
 	}
@@ -1114,6 +1121,107 @@ func TestFailedChatwootSendIsPersistedAndRetried(t *testing.T) {
 	}
 	if evolutionAPI.textCalls != 2 {
 		t.Fatalf("expected initial send and durable retry, got %d calls", evolutionAPI.textCalls)
+	}
+}
+
+func TestUnregisteredWhatsAppNumberIsRetainedWithoutRetry(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "5516991635281@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID: 1, InstanceID: instanceID, RemoteJID: remoteJID, ConversationID: 91,
+			},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{
+		sendTextErr: errors.New(`evolution request failed [500]: {"error":"number is not registered on WhatsApp"}`),
+	}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+
+	body := []byte(`{
+		"event":"message_created", "id":250001, "content":"teste",
+		"message_type":"outgoing", "private":false,
+		"conversation":{"id":91,"inbox_id":7,"contact_inbox":{"source_id":"unused"}},
+		"sender":{"type":"user","name":"Atendente"}
+	}`)
+	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.jobs) != 1 {
+		t.Fatalf("terminal failure should remain for audit, got %d jobs", len(repository.jobs))
+	}
+	for _, job := range repository.jobs {
+		if job.FailedAt == nil || job.Attempts != 1 {
+			t.Fatalf("terminal job was not marked correctly: %#v", job)
+		}
+	}
+	due, err := repository.ListDueOutboundJobs(time.Now().Add(time.Hour), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("terminal job must not be retried: %#v", due)
+	}
+}
+
+func TestRepeatedServer400TriggersOneControlledReconnect(t *testing.T) {
+	evolutionAPI := &outboundFakeEvolution{}
+	service := NewChatwootService(&identityMemoryRepository{}, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+	deliveryErr := errors.New(`failed to deliver: evolution request failed [500]: {"error":"server returned error 400"}`)
+
+	if service.maybeRecoverOutboundSession("instance-1", deliveryErr) {
+		t.Fatal("first delivery error must not reconnect")
+	}
+	if !service.maybeRecoverOutboundSession("instance-1", deliveryErr) {
+		t.Fatal("second consecutive delivery error should reconnect")
+	}
+	if service.maybeRecoverOutboundSession("instance-1", deliveryErr) {
+		t.Fatal("reconnect cooldown should suppress another reconnect")
+	}
+	if evolutionAPI.reconnectCalls != 1 {
+		t.Fatalf("reconnect calls = %d, want 1", evolutionAPI.reconnectCalls)
+	}
+}
+
+func TestOutboundJobStopsAtMaximumAttempts(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "5516991635281@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID: 1, InstanceID: instanceID, RemoteJID: remoteJID, ConversationID: 91,
+			},
+		},
+		jobs: map[uint]*model.ChatwootOutboundJob{},
+	}
+	evolutionAPI := &outboundFakeEvolution{sendTextErr: errors.New("server returned error 463")}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+	job := &model.ChatwootOutboundJob{
+		ID: 1, InstanceID: instanceID, ChatwootMessageID: "250002", Attempts: outboundMaximumAttempts - 1,
+		Payload: []byte(`{
+			"event":"message_created", "id":250002, "content":"teste",
+			"message_type":"outgoing", "private":false,
+			"conversation":{"id":91,"inbox_id":7,"contact_inbox":{"source_id":"unused"}},
+			"sender":{"type":"user","name":"Atendente"}
+		}`),
+	}
+	repository.jobs[job.ID] = job
+
+	service.processOutboundJob(job)
+	stored := repository.jobs[job.ID]
+	if stored == nil || stored.FailedAt == nil || stored.Attempts != outboundMaximumAttempts {
+		t.Fatalf("job should stop at retry limit: %#v", stored)
 	}
 }
 

@@ -61,7 +61,8 @@ type ChatwootIdentityAlias struct {
 }
 
 // ChatwootOutboundJob is a durable copy of a Chatwoot webhook that Evolution
-// could not send to WhatsApp. Jobs are retried until delivery succeeds.
+// could not send to WhatsApp. FailedAt keeps terminal failures for audit while
+// excluding them from the retry queue.
 type ChatwootOutboundJob struct {
 	ID uint `json:"id" gorm:"primaryKey"`
 
@@ -69,9 +70,10 @@ type ChatwootOutboundJob struct {
 	ChatwootMessageID string `json:"chatwootMessageId" gorm:"size:191;uniqueIndex:idx_chatwoot_outbound_message"`
 	Payload           []byte `json:"-" gorm:"type:bytea"`
 
-	Attempts      int       `json:"attempts" gorm:"default:0"`
-	NextAttemptAt time.Time `json:"nextAttemptAt" gorm:"index:idx_chatwoot_outbound_due"`
-	LastError     string    `json:"lastError" gorm:"type:text"`
+	Attempts      int        `json:"attempts" gorm:"default:0"`
+	NextAttemptAt time.Time  `json:"nextAttemptAt" gorm:"index:idx_chatwoot_outbound_due"`
+	LastError     string     `json:"lastError" gorm:"type:text"`
+	FailedAt      *time.Time `json:"failedAt,omitempty" gorm:"index:idx_chatwoot_outbound_failed"`
 
 	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime"`
 	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`

@@ -207,8 +207,10 @@ func (r *chatwootRepository) EnqueueOutboundJob(job *chatwoot_model.ChatwootOutb
 		},
 		DoUpdates: clause.Assignments(map[string]interface{}{
 			"payload":         job.Payload,
+			"attempts":        job.Attempts,
 			"next_attempt_at": job.NextAttemptAt,
 			"last_error":      job.LastError,
+			"failed_at":       job.FailedAt,
 			"updated_at":      time.Now(),
 		}),
 	}).Create(job).Error
@@ -220,7 +222,7 @@ func (r *chatwootRepository) ListDueOutboundJobs(now time.Time, limit int) ([]ch
 	}
 	var jobs []chatwoot_model.ChatwootOutboundJob
 	err := r.db.
-		Where("next_attempt_at <= ?", now).
+		Where("failed_at IS NULL AND next_attempt_at <= ?", now).
 		Order("next_attempt_at ASC, id ASC").
 		Limit(limit).
 		Find(&jobs).Error

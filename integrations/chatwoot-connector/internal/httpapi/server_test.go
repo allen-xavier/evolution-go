@@ -46,6 +46,7 @@ func (fakeEvolution) SendMedia(context.Context, *evolution.Instance, evolution.M
 func (fakeEvolution) SetProxy(context.Context, string, evolution.ProxyConfig) error { return nil }
 func (fakeEvolution) RemoveProxy(context.Context, string) error                     { return nil }
 func (fakeEvolution) DisconnectInstance(context.Context, string) error              { return nil }
+func (fakeEvolution) ReconnectInstance(context.Context, string) error               { return nil }
 
 func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
 	router := New(fakeService{}, fakeEvolution{}, nil, "global-key")

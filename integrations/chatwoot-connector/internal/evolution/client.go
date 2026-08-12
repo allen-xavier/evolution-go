@@ -56,6 +56,7 @@ type API interface {
 	SetProxy(ctx context.Context, instanceID string, config ProxyConfig) error
 	RemoveProxy(ctx context.Context, instanceID string) error
 	DisconnectInstance(ctx context.Context, instanceID string) error
+	ReconnectInstance(ctx context.Context, instanceID string) error
 }
 
 type Client struct {
@@ -202,6 +203,19 @@ func (c *Client) DisconnectInstance(ctx context.Context, instanceID string) erro
 		return err
 	}
 	req.Header.Set("apikey", c.globalAPIKey)
+	return c.do(req)
+}
+
+func (c *Client) ReconnectInstance(ctx context.Context, instanceID string) error {
+	instance, err := c.GetInstance(ctx, instanceID)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/instance/reconnect", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("apikey", instance.Token)
 	return c.do(req)
 }
 

@@ -57,6 +57,39 @@ func TestDisconnectInstanceUsesAdministrativeEndpoint(t *testing.T) {
 	}
 }
 
+func TestReconnectInstanceUsesInstanceToken(t *testing.T) {
+	var reconnectCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/instance/info/instance-1":
+			if r.Method != http.MethodGet || r.Header.Get("apikey") != "global-key" {
+				t.Fatalf("unexpected lookup request: %s key=%s", r.Method, r.Header.Get("apikey"))
+			}
+			_, _ = io.WriteString(w, `{"data":{"id":"instance-1","token":"instance-token"}}`)
+		case "/instance/reconnect":
+			reconnectCalls++
+			if r.Method != http.MethodPost || r.Header.Get("apikey") != "instance-token" {
+				t.Fatalf("unexpected reconnect request: %s key=%s", r.Method, r.Header.Get("apikey"))
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "global-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReconnectInstance(context.Background(), "instance-1"); err != nil {
+		t.Fatal(err)
+	}
+	if reconnectCalls != 1 {
+		t.Fatalf("reconnect calls = %d, want 1", reconnectCalls)
+	}
+}
+
 func TestListInstancesUsesGlobalAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/instance/all" {
