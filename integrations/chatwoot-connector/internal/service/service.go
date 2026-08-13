@@ -61,6 +61,7 @@ type chatwootService struct {
 	webhookCache       *cache.Cache
 	evolutionCache     *cache.Cache
 	contactSyncCache   *cache.Cache
+	quoteCache         *cache.Cache
 	lidGracePeriod     time.Duration
 	lidPollInterval    time.Duration
 	identityLocks      [256]sync.Mutex
@@ -98,6 +99,13 @@ type chatwootConversationCreateResponse struct {
 type chatwootMessageCreateResponse struct {
 	ID       interface{} `json:"id"`
 	SourceID string      `json:"source_id"`
+}
+
+type chatwootConversationMessagesResponse struct {
+	Payload []struct {
+		ID       int    `json:"id"`
+		SourceID string `json:"source_id"`
+	} `json:"payload"`
 }
 
 type chatwootContactSearchResponse struct {
@@ -178,6 +186,8 @@ type evolutionMessage struct {
 	FromMe          bool
 	Unavailable     bool
 	IdentityAliases []string
+	QuotedStanzaID  string
+	QuotedSummary   string
 }
 
 type mediaAttachment struct {
@@ -1539,11 +1549,21 @@ func (s *chatwootService) sendMessageToChatwoot(
 	route := fmt.Sprintf("/api/v1/accounts/%s/conversations/%d/messages", cfg.AccountID, binding.ConversationID)
 
 	if len(message.Media.Data) == 0 {
+		content := message.Content
 		body := map[string]interface{}{
-			"content":      message.Content,
 			"message_type": messageType,
 			"private":      false,
 		}
+		if message.QuotedStanzaID != "" {
+			if replyToID := s.findQuotedChatwootMessageID(cfg, binding, message.QuotedStanzaID); replyToID > 0 {
+				body["content_attributes"] = map[string]interface{}{"in_reply_to": replyToID}
+				s.logQuoteResolution(binding.InstanceID, message, fmt.Sprintf("native in_reply_to=%d", replyToID))
+			} else {
+				content = formatQuotedReply(message.QuotedSummary, content)
+				s.logQuoteResolution(binding.InstanceID, message, "text fallback")
+			}
+		}
+		body["content"] = content
 		if strings.TrimSpace(message.MessageSourceID) != "" {
 			body["source_id"] = message.MessageSourceID
 		}
@@ -1554,11 +1574,113 @@ func (s *chatwootService) sendMessageToChatwoot(
 		return err
 	}
 
-	respBody, err := s.chatwootRequestMultipart(cfg, route, message.Content, messageType, message.MessageSourceID, message.Media)
+	content := message.Content
+	if message.QuotedStanzaID != "" && message.QuotedSummary != "" {
+		content = formatQuotedReply(message.QuotedSummary, content)
+	}
+	respBody, err := s.chatwootRequestMultipart(cfg, route, content, messageType, message.MessageSourceID, message.Media)
 	if err == nil {
 		s.rememberMirroredChatwootMessage(binding.InstanceID, message.MessageSourceID, respBody)
 	}
 	return err
+}
+
+// findQuotedChatwootMessageID resolves a WhatsApp stanza ID to the Chatwoot
+// message ID that mirrors it, so replies can use the native in_reply_to
+// attribute. Any failure returns zero and the caller falls back to plain text.
+func (s *chatwootService) findQuotedChatwootMessageID(
+	cfg *chatwoot_model.ChatwootConfig,
+	binding *chatwoot_model.ChatwootBinding,
+	stanzaID string,
+) int {
+	stanzaID = strings.TrimSpace(stanzaID)
+	if stanzaID == "" || cfg == nil || binding == nil || binding.ConversationID <= 0 {
+		return 0
+	}
+
+	cacheKey := fmt.Sprintf("%s:%d:%s", binding.InstanceID, binding.ConversationID, stanzaID)
+	if s.quoteCache != nil {
+		if cached, found := s.quoteCache.Get(cacheKey); found {
+			if messageID, ok := cached.(int); ok {
+				return messageID
+			}
+		}
+		// Outgoing messages created in the Chatwoot UI carry no source_id, but
+		// the connector recorded their WhatsApp ID at send time.
+		outboundKey := fmt.Sprintf("%s|outbound|%s", binding.InstanceID, stanzaID)
+		if cached, found := s.quoteCache.Get(outboundKey); found {
+			if messageID, ok := cached.(int); ok {
+				s.quoteCache.Set(cacheKey, messageID, 24*time.Hour)
+				return messageID
+			}
+		}
+	}
+
+	route := fmt.Sprintf("/api/v1/accounts/%s/conversations/%d/messages", cfg.AccountID, binding.ConversationID)
+	respBody, err := s.chatwootRequestJSON(http.MethodGet, cfg, route, nil)
+	if err != nil {
+		if s.loggerWrapper != nil {
+			s.loggerWrapper.GetLogger(binding.InstanceID).LogWarn(
+				"[%s] Failed to list Chatwoot messages for quoted lookup in conversation %d: %v",
+				binding.InstanceID,
+				binding.ConversationID,
+				err,
+			)
+		}
+		return 0
+	}
+
+	var resp chatwootConversationMessagesResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		if s.loggerWrapper != nil {
+			s.loggerWrapper.GetLogger(binding.InstanceID).LogWarn(
+				"[%s] Failed to parse Chatwoot messages for quoted lookup in conversation %d: %v",
+				binding.InstanceID,
+				binding.ConversationID,
+				err,
+			)
+		}
+		return 0
+	}
+
+	wantIn := "wa-in:" + stanzaID
+	wantOut := "wa-out:" + stanzaID
+	for _, message := range resp.Payload {
+		if message.ID <= 0 {
+			continue
+		}
+		if message.SourceID == wantIn || message.SourceID == wantOut {
+			if s.quoteCache != nil {
+				s.quoteCache.Set(cacheKey, message.ID, 24*time.Hour)
+			}
+			return message.ID
+		}
+	}
+	if s.loggerWrapper != nil {
+		s.loggerWrapper.GetLogger(binding.InstanceID).LogInfo(
+			"[%s] Quoted stanza %s not mirrored in conversation %d (%d messages scanned)",
+			binding.InstanceID,
+			stanzaID,
+			binding.ConversationID,
+			len(resp.Payload),
+		)
+	}
+	return 0
+}
+
+// rememberOutboundMessageMapping stores the WhatsApp message ID assigned to an
+// outgoing Chatwoot message, so quoted replies to it can later be resolved to
+// the native Chatwoot message ID via in_reply_to. In-memory only; after a
+// restart the lookup simply falls back to plain-text quoting.
+func (s *chatwootService) rememberOutboundMessageMapping(instanceID string, whatsappMessageID string, chatwootMessageID string) {
+	if s.quoteCache == nil {
+		return
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(chatwootMessageID))
+	if err != nil || id <= 0 {
+		return
+	}
+	s.quoteCache.Set(fmt.Sprintf("%s|outbound|%s", instanceID, whatsappMessageID), id, 24*time.Hour)
 }
 
 func (s *chatwootService) sendTextFromChatwoot(
@@ -1587,6 +1709,7 @@ func (s *chatwootService) sendTextFromChatwoot(
 		return err
 	}
 
+	s.rememberOutboundMessageMapping(instance.Id, messageID, chatwootMessageID)
 	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Chatwoot message %s sent to WhatsApp through Evolution send service as text", instance.Id, chatwootMessageID)
 	return nil
 }
@@ -1629,6 +1752,7 @@ func (s *chatwootService) sendMediaFromChatwoot(
 		return err
 	}
 
+	s.rememberOutboundMessageMapping(instance.Id, messageID, chatwootMessageID)
 	s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Chatwoot message %s sent to WhatsApp through Evolution send service as media (%s)", instance.Id, chatwootMessageID, mediaKind)
 	return nil
 }
@@ -1880,6 +2004,7 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 	}
 
 	content, media := s.extractContentAndMedia(messageMap)
+	quotedStanzaID, quotedSummary := extractQuotedContext(data)
 	sourcePrefix := "wa-in:"
 	if fromMe {
 		sourcePrefix = "wa-out:"
@@ -1901,6 +2026,8 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 		FromMe:          fromMe,
 		Unavailable:     mapBool(data, "IsUnavailable", "isUnavailable") || mapBool(info, "IsUnavailable", "isUnavailable"),
 		IdentityAliases: evolutionIdentityAliases(data, info, fromMe),
+		QuotedStanzaID:  quotedStanzaID,
+		QuotedSummary:   quotedSummary,
 	}, true
 }
 
@@ -1989,6 +2116,95 @@ func (s *chatwootService) extractContentAndMedia(messageMap map[string]interface
 	}
 
 	return "[message]", mediaAttachment{}
+}
+
+func extractQuotedContext(data map[string]interface{}) (string, string) {
+	if !mapBool(data, "isQuoted", "IsQuoted") {
+		return "", ""
+	}
+	quoted := mapFromAny(mapLookup(data, "quoted", "Quoted"))
+	if quoted == nil {
+		return "", ""
+	}
+	stanzaID := strings.TrimSpace(mapString(quoted, "stanzaID", "stanzaId", "StanzaID"))
+	summary := summarizeQuotedMessage(mapFromAny(mapLookup(quoted, "quotedMessage", "QuotedMessage")))
+	return stanzaID, summary
+}
+
+func summarizeQuotedMessage(messageMap map[string]interface{}) string {
+	if len(messageMap) == 0 {
+		return ""
+	}
+
+	if conversation := strings.TrimSpace(mapString(messageMap, "conversation", "Conversation")); conversation != "" {
+		return conversation
+	}
+	if ext := mapFromAny(mapLookup(messageMap, "extendedTextMessage", "ExtendedTextMessage")); ext != nil {
+		if text := strings.TrimSpace(mapString(ext, "text", "Text")); text != "" {
+			return text
+		}
+	}
+	if child := mapFromAny(mapLookup(messageMap, "documentWithCaptionMessage", "DocumentWithCaptionMessage")); child != nil {
+		if nested := mapFromAny(mapLookup(child, "message", "Message")); nested != nil {
+			return summarizeQuotedMessage(nested)
+		}
+	}
+
+	if img := mapFromAny(mapLookup(messageMap, "imageMessage", "ImageMessage")); img != nil {
+		return quotedMediaSummary(img, "[imagem]")
+	}
+	if video := mapFromAny(mapLookup(messageMap, "videoMessage", "VideoMessage")); video != nil {
+		return quotedMediaSummary(video, "[vídeo]")
+	}
+	if audio := mapFromAny(mapLookup(messageMap, "audioMessage", "AudioMessage")); audio != nil {
+		return quotedMediaSummary(audio, "[áudio]")
+	}
+	if doc := mapFromAny(mapLookup(messageMap, "documentMessage", "DocumentMessage")); doc != nil {
+		return quotedMediaSummary(doc, "[documento]")
+	}
+	if sticker := mapFromAny(mapLookup(messageMap, "stickerMessage", "StickerMessage")); sticker != nil {
+		return quotedMediaSummary(sticker, "[figurinha]")
+	}
+
+	return ""
+}
+
+func quotedMediaSummary(mediaMap map[string]interface{}, label string) string {
+	if caption := strings.TrimSpace(mapString(mediaMap, "caption", "Caption")); caption != "" {
+		return caption
+	}
+	return label
+}
+
+func formatQuotedReply(summary string, content string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return content
+	}
+	// Plain-text fallback: avoid Markdown blockquote ("> ") here — some
+	// Chatwoot frontends render it as an unreadable box inside the bubble.
+	quoted := "Mensagem citada: " + strings.ReplaceAll(summary, "\n", " ")
+	if strings.TrimSpace(content) == "" || content == "[message]" {
+		return quoted
+	}
+	return quoted + "\n" + content
+}
+
+// logQuoteResolution records how a quoted reply was delivered to Chatwoot, to
+// aid diagnosing quote issues in production.
+func (s *chatwootService) logQuoteResolution(instanceID string, message evolutionMessage, resolution string) {
+	if s.loggerWrapper == nil {
+		return
+	}
+	s.loggerWrapper.GetLogger(instanceID).LogInfo(
+		"[%s] Quoted reply %s (stanza=%s, summary=%d chars, content=%d chars): %s",
+		instanceID,
+		message.MessageID,
+		message.QuotedStanzaID,
+		len(message.QuotedSummary),
+		len(message.Content),
+		resolution,
+	)
 }
 
 func isWhatsAppProtocolMessage(messageMap map[string]interface{}) bool {
@@ -2933,6 +3149,7 @@ func NewChatwootService(
 		webhookCache:     cache.New(24*time.Hour, 1*time.Hour),
 		evolutionCache:   cache.New(24*time.Hour, 1*time.Hour),
 		contactSyncCache: cache.New(24*time.Hour, 1*time.Hour),
+		quoteCache:       cache.New(24*time.Hour, 1*time.Hour),
 		outboundRecovery: map[string]outboundRecoveryState{},
 		lidGracePeriod:   lidIdentityGracePeriod,
 		lidPollInterval:  lidIdentityPollInterval,

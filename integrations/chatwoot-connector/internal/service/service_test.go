@@ -16,6 +16,7 @@ import (
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/evolution"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/logging"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
+	"github.com/patrickmn/go-cache"
 )
 
 type outboundFakeEvolution struct {
@@ -1393,5 +1394,419 @@ func TestParseChatwootContactIDSupportsTopLevelID(t *testing.T) {
 	}
 	if id != 987 {
 		t.Fatalf("unexpected id: %d", id)
+	}
+}
+
+func TestExtractEvolutionQuotedTextMessage(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	raw := []byte(`{
+		"event": "Message",
+		"data": {
+			"Info": {
+				"Chat": "553193291010@s.whatsapp.net",
+				"ID": "REPLY1",
+				"IsFromMe": false,
+				"PushName": "Cliente"
+			},
+			"Message": {
+				"extendedTextMessage": {"text": "pode fechar"}
+			},
+			"isQuoted": true,
+			"quoted": {
+				"stanzaID": "QUOTED1",
+				"quotedMessage": {
+					"conversation": "o pedido sai hoje?"
+				}
+			}
+		}
+	}`)
+
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, ok := service.extractEvolutionMessage(payload, raw)
+	if !ok {
+		t.Fatal("expected message to be extracted")
+	}
+	if msg.QuotedStanzaID != "QUOTED1" {
+		t.Fatalf("unexpected quoted stanza id: %q", msg.QuotedStanzaID)
+	}
+	if msg.QuotedSummary != "o pedido sai hoje?" {
+		t.Fatalf("unexpected quoted summary: %q", msg.QuotedSummary)
+	}
+	if msg.Content != "pode fechar" {
+		t.Fatalf("unexpected content: %q", msg.Content)
+	}
+}
+
+func TestExtractEvolutionQuotedMediaUsesLabelOrCaption(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	tests := []struct {
+		name          string
+		quotedMessage string
+		wantSummary   string
+	}{
+		{name: "image without caption", quotedMessage: `{"imageMessage": {"mimetype": "image/jpeg"}}`, wantSummary: "[imagem]"},
+		{name: "video with caption", quotedMessage: `{"videoMessage": {"caption": "olha isso"}}`, wantSummary: "olha isso"},
+		{name: "audio", quotedMessage: `{"audioMessage": {"mimetype": "audio/ogg"}}`, wantSummary: "[áudio]"},
+		{name: "document", quotedMessage: `{"documentMessage": {"fileName": "a.pdf"}}`, wantSummary: "[documento]"},
+		{name: "sticker", quotedMessage: `{"stickerMessage": {"mimetype": "image/webp"}}`, wantSummary: "[figurinha]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"event": "Message",
+				"data": {
+					"Info": {
+						"Chat": "553193291010@s.whatsapp.net",
+						"ID": "REPLY2",
+						"IsFromMe": false
+					},
+					"Message": {
+						"conversation": "ok"
+					},
+					"isQuoted": true,
+					"quoted": {
+						"stanzaID": "QUOTED2",
+						"quotedMessage": ` + tt.quotedMessage + `
+					}
+				}
+			}`)
+
+			var payload evolutionWebhookPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			msg, ok := service.extractEvolutionMessage(payload, raw)
+			if !ok {
+				t.Fatal("expected message to be extracted")
+			}
+			if msg.QuotedSummary != tt.wantSummary {
+				t.Fatalf("unexpected quoted summary: got %q want %q", msg.QuotedSummary, tt.wantSummary)
+			}
+		})
+	}
+}
+
+func TestExtractEvolutionMessageWithoutQuoteHasNoQuotedFields(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	raw := []byte(`{
+		"event": "Message",
+		"data": {
+			"Info": {
+				"Chat": "553193291010@s.whatsapp.net",
+				"ID": "PLAIN1",
+				"IsFromMe": false
+			},
+			"Message": {
+				"conversation": "ola"
+			}
+		}
+	}`)
+
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := service.extractEvolutionMessage(payload, raw)
+	if !ok {
+		t.Fatal("expected message to be extracted")
+	}
+	if msg.QuotedStanzaID != "" || msg.QuotedSummary != "" {
+		t.Fatalf("unexpected quoted fields: %#v", msg)
+	}
+}
+
+func TestFormatQuotedReply(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		content string
+		want    string
+	}{
+		{name: "prepends quoted text", summary: "texto citado", content: "resposta", want: "Mensagem citada: texto citado\nresposta"},
+		{name: "multiline summary is flattened", summary: "linha1\nlinha2", content: "resposta", want: "Mensagem citada: linha1 linha2\nresposta"},
+		{name: "empty content keeps only quote", summary: "texto citado", content: "", want: "Mensagem citada: texto citado"},
+		{name: "placeholder content is replaced", summary: "[imagem]", content: "[message]", want: "Mensagem citada: [imagem]"},
+		{name: "empty summary keeps content", summary: "", content: "resposta", want: "resposta"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatQuotedReply(tt.summary, tt.content); got != tt.want {
+				t.Fatalf("unexpected format: got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSendMessageToChatwootUsesNativeInReplyTo(t *testing.T) {
+	var created map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"payload":[{"id":77,"source_id":"wa-out:QUOTED9"}]}`))
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Errorf("failed to decode create body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":88}`))
+	}))
+	defer server.Close()
+
+	service := &chatwootService{httpClient: server.Client()}
+	cfg := &model.ChatwootConfig{URL: server.URL, Token: "token", AccountID: "1"}
+	binding := &model.ChatwootBinding{InstanceID: "inst", ConversationID: 55}
+	message := evolutionMessage{
+		Content:         "combinado",
+		MessageSourceID: "wa-in:REPLY9",
+		QuotedStanzaID:  "QUOTED9",
+		QuotedSummary:   "fechamos por 100?",
+	}
+
+	if err := service.sendMessageToChatwoot(cfg, binding, message, "incoming"); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs, ok := created["content_attributes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content_attributes in create body: %#v", created)
+	}
+	if attrs["in_reply_to"] != float64(77) {
+		t.Fatalf("unexpected in_reply_to: %#v", attrs["in_reply_to"])
+	}
+	if created["content"] != "combinado" {
+		t.Fatalf("content must stay untouched on native reply: %#v", created["content"])
+	}
+}
+
+func TestSendMessageToChatwootUsesOutboundMapping(t *testing.T) {
+	var created map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			t.Errorf("GET must not be called when outbound mapping is cached")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Errorf("failed to decode create body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":88}`))
+	}))
+	defer server.Close()
+
+	service := &chatwootService{
+		httpClient: server.Client(),
+		quoteCache: cache.New(time.Hour, time.Hour),
+	}
+	cfg := &model.ChatwootConfig{URL: server.URL, Token: "token", AccountID: "1"}
+	binding := &model.ChatwootBinding{InstanceID: "inst", ConversationID: 55}
+
+	service.rememberOutboundMessageMapping("inst", "WAOUT1", "431")
+	message := evolutionMessage{
+		Content:         "combinado",
+		MessageSourceID: "wa-in:REPLY11",
+		QuotedStanzaID:  "WAOUT1",
+		QuotedSummary:   "fechamos por 100?",
+	}
+
+	if err := service.sendMessageToChatwoot(cfg, binding, message, "incoming"); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs, ok := created["content_attributes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content_attributes via outbound mapping: %#v", created)
+	}
+	if attrs["in_reply_to"] != float64(431) {
+		t.Fatalf("unexpected in_reply_to: %#v", attrs["in_reply_to"])
+	}
+	if created["content"] != "combinado" {
+		t.Fatalf("content must stay untouched on native reply: %#v", created["content"])
+	}
+}
+
+func TestSendMessageToChatwootFallsBackToQuotedText(t *testing.T) {
+	var created map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"payload":[{"id":77,"source_id":"wa-in:OTHER"}]}`))
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Errorf("failed to decode create body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":88}`))
+	}))
+	defer server.Close()
+
+	service := &chatwootService{httpClient: server.Client()}
+	cfg := &model.ChatwootConfig{URL: server.URL, Token: "token", AccountID: "1"}
+	binding := &model.ChatwootBinding{InstanceID: "inst", ConversationID: 55}
+	message := evolutionMessage{
+		Content:         "combinado",
+		MessageSourceID: "wa-in:REPLY10",
+		QuotedStanzaID:  "QUOTED10",
+		QuotedSummary:   "fechamos por 100?",
+	}
+
+	if err := service.sendMessageToChatwoot(cfg, binding, message, "incoming"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := created["content_attributes"]; ok {
+		t.Fatalf("content_attributes must be omitted when lookup misses: %#v", created)
+	}
+	if created["content"] != "Mensagem citada: fechamos por 100?\ncombinado" {
+		t.Fatalf("unexpected fallback content: %#v", created["content"])
+	}
+}
+
+func TestSendMessageToChatwootQuotedLookupErrorKeepsOriginalBehavior(t *testing.T) {
+	var created map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Errorf("failed to decode create body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":88}`))
+	}))
+	defer server.Close()
+
+	service := &chatwootService{httpClient: server.Client()}
+	cfg := &model.ChatwootConfig{URL: server.URL, Token: "token", AccountID: "1"}
+	binding := &model.ChatwootBinding{InstanceID: "inst", ConversationID: 55}
+	message := evolutionMessage{
+		Content:         "combinado",
+		MessageSourceID: "wa-in:REPLY11",
+		QuotedStanzaID:  "QUOTED11",
+		QuotedSummary:   "fechamos por 100?",
+	}
+
+	if err := service.sendMessageToChatwoot(cfg, binding, message, "incoming"); err != nil {
+		t.Fatal(err)
+	}
+	if created["content"] != "Mensagem citada: fechamos por 100?\ncombinado" {
+		t.Fatalf("lookup error must fall back to quoted text: %#v", created["content"])
+	}
+}
+
+func TestQuotedReplyToOutgoingChatwootMessageFallsBackToText(t *testing.T) {
+	const (
+		instanceID     = "4ddbca6b-d357-4d7b-9828-17d56f52963a"
+		phoneJID       = "553193291010@s.whatsapp.net"
+		conversationID = 7729
+		stanzaID       = "3EB0A1B2C3D4E5F60718293A4B5C6D7E8"
+	)
+
+	var created map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/accounts/1/conversations/7729/messages":
+			// Agent message created directly in the Chatwoot UI has no source_id.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"payload":[{"id":50,"source_id":null,"content":"Segue o boleto"},{"id":40,"source_id":"wa-in:OLDMSG","content":"oi"}]}`)
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/1/conversations/7729/messages":
+			if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+				t.Fatalf("decode message create: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":88}`)
+			return
+		case r.Method == http.MethodPut:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+			return
+		default:
+			http.Error(w, "unexpected route: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+	}))
+	defer server.Close()
+
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {
+				InstanceID: instanceID,
+				Enabled:    true,
+				URL:        server.URL,
+				AccountID:  "1",
+				Token:      "token",
+			},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, phoneJID): {
+				ID:             15,
+				InstanceID:     instanceID,
+				RemoteJID:      phoneJID,
+				ContactID:      15715,
+				ConversationID: conversationID,
+			},
+		},
+	}
+	service := NewChatwootService(repository, nil, nil, testLoggerManager()).(*chatwootService)
+
+	raw := []byte(`{
+		"event": "Message",
+		"instanceId": "` + instanceID + `",
+		"data": {
+			"Info": {
+				"Chat": "` + phoneJID + `",
+				"Sender": "` + phoneJID + `",
+				"ID": "ACDAB5F65BD093CE2AA7530AE32A3355",
+				"IsFromMe": false,
+				"PushName": "Cliente"
+			},
+			"Message": {
+				"extendedTextMessage": {
+					"text": "perfeito, obrigado",
+					"contextInfo": {
+						"stanzaId": "` + stanzaID + `",
+						"participant": "5511998877665@s.whatsapp.net",
+						"quotedMessage": {"extendedTextMessage": {"text": "Segue o boleto"}}
+					}
+				}
+			},
+			"isQuoted": true,
+			"quoted": {
+				"stanzaID": "` + stanzaID + `",
+				"quotedMessage": {"extendedTextMessage": {"text": "Segue o boleto"}}
+			}
+		}
+	}`)
+
+	if err := service.HandleEvolutionEvent(raw); err != nil {
+		t.Fatal(err)
+	}
+	if created == nil {
+		t.Fatal("expected a Chatwoot message to be created")
+	}
+	if _, ok := created["content_attributes"]; ok {
+		t.Fatalf("content_attributes must be omitted when the quoted message has no mirrored source_id: %#v", created)
+	}
+	if created["content"] != "Mensagem citada: Segue o boleto\nperfeito, obrigado" {
+		t.Fatalf("unexpected content: %#v", created["content"])
 	}
 }
