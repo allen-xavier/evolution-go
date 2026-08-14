@@ -220,6 +220,46 @@ func TestExtractEvolutionTextMessage(t *testing.T) {
 	if msg.FromMe {
 		t.Fatal("expected incoming message")
 	}
+	if msg.ContactName != "Cliente" {
+		t.Fatalf("unexpected contact name: %s", msg.ContactName)
+	}
+}
+
+func TestExtractEvolutionFromMeMessageIgnoresPushName(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	raw := []byte(`{
+		"event": "Message",
+		"data": {
+			"Info": {
+				"Chat": "553193291010@s.whatsapp.net",
+				"ID": "OUT123",
+				"IsFromMe": true,
+				"PushName": "Dono da Instancia"
+			},
+			"Message": {
+				"conversation": "ola"
+			}
+		}
+	}`)
+
+	var payload evolutionWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, ok := service.extractEvolutionMessage(payload, raw)
+	if !ok {
+		t.Fatal("expected message to be extracted")
+	}
+	if !msg.FromMe {
+		t.Fatal("expected outgoing message")
+	}
+	if msg.ContactName != "" {
+		t.Fatalf("fromMe PushName must not be used as contact name, got: %s", msg.ContactName)
+	}
 }
 
 func TestExtractEvolutionProtocolMessagesAreIgnored(t *testing.T) {
@@ -554,8 +594,8 @@ func TestBuildChatwootContactRefDoesNotUseLIDAsPhone(t *testing.T) {
 	if ref.SourceID != ref.Identifier {
 		t.Fatalf("lid source id and identifier should match, got source=%s identifier=%s", ref.SourceID, ref.Identifier)
 	}
-	if ref.Name != lid {
-		t.Fatalf("unexpected lid fallback name: %s", ref.Name)
+	if ref.Name != "" {
+		t.Fatalf("name fallback must not happen on the ref, got: %s", ref.Name)
 	}
 
 	phoneRef := buildChatwootContactRef(instanceID, "553193291010@s.whatsapp.net", "", true)

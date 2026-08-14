@@ -202,6 +202,7 @@ type chatwootContactRef struct {
 	Identifier string
 	Phone      string
 	Name       string
+	RemoteJID  string
 }
 
 func (s *chatwootService) Set(instanceID string, payload *chatwoot_model.SetChatwootPayload) (*chatwoot_model.ChatwootConfigView, error) {
@@ -1288,9 +1289,13 @@ func containsJID(values []string, expected string) bool {
 }
 
 func (s *chatwootService) createChatwootContact(cfg *chatwoot_model.ChatwootConfig, contactRef chatwootContactRef) (int, error) {
+	name := strings.TrimSpace(contactRef.Name)
+	if name == "" {
+		name = firstNonEmptyString(contactRef.Phone, contactRef.RemoteJID, contactRef.SourceID)
+	}
 	body := map[string]interface{}{
 		"inbox_id":   cfg.InboxID,
-		"name":       contactRef.Name,
+		"name":       name,
 		"identifier": contactRef.Identifier,
 	}
 	if strings.TrimSpace(contactRef.Phone) != "" {
@@ -2010,11 +2015,16 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 		sourcePrefix = "wa-out:"
 	}
 
-	contactName := strings.TrimSpace(firstNonEmptyString(
-		mapString(data, "PushName", "pushName"),
-		mapString(info, "PushName", "pushName"),
-		contactNameFallback(remoteJID),
-	))
+	// PushName belongs to the message sender. On fromMe messages it carries
+	// the instance owner's name, not the contact's, so it must never be used
+	// as the Chatwoot contact name.
+	contactName := ""
+	if !fromMe {
+		contactName = strings.TrimSpace(firstNonEmptyString(
+			mapString(data, "PushName", "pushName"),
+			mapString(info, "PushName", "pushName"),
+		))
+	}
 
 	return evolutionMessage{
 		RemoteJID:       remoteJID,
@@ -2407,13 +2417,6 @@ func shouldRemoveBrazilNinthDigit(base string) bool {
 	return ddd >= 31
 }
 
-func contactNameFallback(remoteJID string) string {
-	if isLIDRemoteJID(remoteJID) {
-		return normalizeRemoteJID(remoteJID)
-	}
-	return toE164(remoteJID, true)
-}
-
 func buildChatwootContactRef(instanceID string, remoteJID string, contactName string, mergeBrazilContacts bool) chatwootContactRef {
 	remoteJID = normalizeRemoteJID(remoteJID)
 	sourceID := chatwootSourceID(instanceID, remoteJID)
@@ -2427,16 +2430,16 @@ func buildChatwootContactRef(instanceID string, remoteJID string, contactName st
 		identifier = sourceID
 	}
 
+	// Name stays empty when unknown so existing contacts are never renamed
+	// with a fallback; the creation fallback lives in createChatwootContact.
 	name := strings.TrimSpace(contactName)
-	if name == "" {
-		name = firstNonEmptyString(phone, remoteJID, sourceID)
-	}
 
 	return chatwootContactRef{
 		SourceID:   sourceID,
 		Identifier: identifier,
 		Phone:      phone,
 		Name:       name,
+		RemoteJID:  remoteJID,
 	}
 }
 

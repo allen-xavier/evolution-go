@@ -7,3 +7,5 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+# Kimi project memory
+.kimi-memory/
