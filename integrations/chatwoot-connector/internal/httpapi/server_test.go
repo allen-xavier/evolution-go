@@ -49,7 +49,7 @@ func (fakeEvolution) DisconnectInstance(context.Context, string) error          
 func (fakeEvolution) ReconnectInstance(context.Context, string) error               { return nil }
 
 func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
-	router := New(fakeService{}, fakeEvolution{}, nil, "global-key")
+	router := New(fakeService{}, fakeEvolution{}, nil, nil, "global-key")
 
 	uiRequest := httptest.NewRequest(http.MethodGet, "/chatwoot", nil)
 	uiResponse := httptest.NewRecorder()
@@ -67,7 +67,7 @@ func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
 }
 
 func TestInstancesEndpointDoesNotExposeInstanceTokens(t *testing.T) {
-	router := New(fakeService{}, fakeEvolution{}, nil, "global-key")
+	router := New(fakeService{}, fakeEvolution{}, nil, nil, "global-key")
 	request := httptest.NewRequest(http.MethodGet, "/chatwoot/instances", nil)
 	request.Header.Set("apikey", "global-key")
 	response := httptest.NewRecorder()

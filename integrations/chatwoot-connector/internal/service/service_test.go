@@ -175,6 +175,14 @@ func (r *identityMemoryRepository) DeleteOutboundJob(job *model.ChatwootOutbound
 	return nil
 }
 
+func (r *identityMemoryRepository) GetSetting(key string) (string, error) {
+	return "", nil
+}
+
+func (r *identityMemoryRepository) SetSetting(key string, value string) error {
+	return nil
+}
+
 func testLoggerManager() *logging.Manager {
 	return logging.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }

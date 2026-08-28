@@ -12,6 +12,7 @@ import (
 	chatwoot_model "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/model"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/proxymanager"
 	chatwoot_service "github.com/allen-xavier/evolution-go-chatwoot-connector/internal/service"
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/watchdog"
 	"github.com/gin-gonic/gin"
 )
 
@@ -27,7 +28,12 @@ type ProxyManager interface {
 	Test(ctx context.Context, instanceID string, input proxymanager.ConfigInput) (*proxymanager.TestResult, error)
 }
 
-func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, proxyManager ProxyManager, adminAPIKey string) *gin.Engine {
+type WatchdogController interface {
+	Status() watchdog.StatusView
+	SetConfig(ctx context.Context, enabled bool, webhookURL string) error
+}
+
+func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, proxyManager ProxyManager, watchdogCtl WatchdogController, adminAPIKey string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -50,8 +56,36 @@ func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, p
 	protected.PUT("/proxy/:instanceId", setProxyHandler(proxyManager))
 	protected.DELETE("/proxy/:instanceId", removeProxyHandler(proxyManager))
 	protected.POST("/proxy/:instanceId/test", testProxyHandler(proxyManager))
+	if watchdogCtl != nil {
+		protected.GET("/watchdog", getWatchdogHandler(watchdogCtl))
+		protected.PUT("/watchdog", putWatchdogHandler(watchdogCtl))
+	}
 
 	return router
+}
+
+func getWatchdogHandler(watchdogCtl WatchdogController) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": watchdogCtl.Status()})
+	}
+}
+
+func putWatchdogHandler(watchdogCtl WatchdogController) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var payload struct {
+			Enabled    bool   `json:"enabled"`
+			WebhookURL string `json:"webhookUrl"`
+		}
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := watchdogCtl.SetConfig(c.Request.Context(), payload.Enabled, payload.WebhookURL); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": watchdogCtl.Status()})
+	}
 }
 
 func getProxyHandler(manager ProxyManager) gin.HandlerFunc {

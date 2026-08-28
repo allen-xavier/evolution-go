@@ -2,6 +2,21 @@ package model
 
 import "time"
 
+// WatchdogProbeMarker prefixes the self-message the instance watchdog sends to
+// verify that WhatsApp is really routing messages to the linked device. The
+// connector never syncs messages containing this marker to Chatwoot.
+const WatchdogProbeMarker = "[connector-watchdog]"
+
+// ConnectorSetting is a generic key/value row for connector-wide settings that
+// must be changeable at runtime without a redeploy (e.g. watchdog toggle).
+type ConnectorSetting struct {
+	Key   string `json:"key" gorm:"size:191;primaryKey"`
+	Value string `json:"value" gorm:"type:text"`
+
+	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime"`
+	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
+}
+
 type ChatwootConfig struct {
 	InstanceID string `json:"instanceId" gorm:"type:uuid;primaryKey"`
 

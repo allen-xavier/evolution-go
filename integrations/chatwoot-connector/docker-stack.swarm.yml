@@ -70,7 +70,7 @@ services:
         - traefik.http.services.evolution-go.loadbalancer.passHostHeader=true
 
   chatwoot_connector:
-    image: ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.5.4
+    image: ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.6.1
     networks:
       - minha_rede
     environment:

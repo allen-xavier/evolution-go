@@ -23,6 +23,7 @@ import (
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/proxymanager"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/repository"
 	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/service"
+	"github.com/allen-xavier/evolution-go-chatwoot-connector/internal/watchdog"
 )
 
 func main() {
@@ -59,6 +60,7 @@ func run(logger *slog.Logger) error {
 		&model.ChatwootBinding{},
 		&model.ChatwootIdentityAlias{},
 		&model.ChatwootOutboundJob{},
+		&model.ConnectorSetting{},
 		&proxymanager.TestRecord{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -71,25 +73,32 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	repo := repository.NewChatwootRepository(db)
 	chatwootService := service.NewChatwootService(
-		repository.NewChatwootRepository(db),
+		repo,
 		evolutionClient,
 		nil,
 		logging.New(logger),
 	)
 	proxyManager := proxymanager.New(proxymanager.NewGormRepository(db), evolutionClient, proxyRequired)
 	proxyManager.SetQuarantineOnUnsafe(proxyCollisionAction == "quarantine")
+	watchdogSvc := watchdog.New(repo, repo, evolutionClient, logging.New(logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go chatwootService.Run(ctx)
+	go watchdogSvc.Run(ctx)
 	go proxyManager.RunMonitor(ctx, time.Duration(proxyMonitorSeconds)*time.Second, func(err error) {
 		logger.Error("proxy safety monitor failed", "error", err)
 	})
 
 	go func() {
-		if err := broker.Run(ctx, amqpURL, logger, chatwootService.HandleEvolutionEvent); err != nil {
+		handler := func(raw []byte) error {
+			watchdogSvc.Observe(raw)
+			return chatwootService.HandleEvolutionEvent(raw)
+		}
+		if err := broker.Run(ctx, amqpURL, logger, handler); err != nil {
 			logger.Error("rabbitmq consumer stopped", "error", err)
 			stop()
 		}
@@ -97,7 +106,7 @@ func run(logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           httpapi.New(chatwootService, evolutionClient, proxyManager, connectorAPIKey),
+		Handler:           httpapi.New(chatwootService, evolutionClient, proxyManager, watchdogSvc, connectorAPIKey),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       70 * time.Second,
 		WriteTimeout:      70 * time.Second,

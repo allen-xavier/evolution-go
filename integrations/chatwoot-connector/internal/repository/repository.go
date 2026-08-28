@@ -32,6 +32,9 @@ type ChatwootRepository interface {
 	ListDueOutboundJobs(now time.Time, limit int) ([]chatwoot_model.ChatwootOutboundJob, error)
 	SaveOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
 	DeleteOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
+
+	GetSetting(key string) (string, error)
+	SetSetting(key string, value string) error
 }
 
 type chatwootRepository struct {
@@ -245,6 +248,33 @@ func (r *chatwootRepository) DeleteOutboundJob(job *chatwoot_model.ChatwootOutbo
 
 func NewChatwootRepository(db *gorm.DB) ChatwootRepository {
 	return &chatwootRepository{db: db}
+}
+
+func (r *chatwootRepository) GetSetting(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", errors.New("setting key is required")
+	}
+	var setting chatwoot_model.ConnectorSetting
+	err := r.db.Where("key = ?", key).First(&setting).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return setting.Value, nil
+}
+
+func (r *chatwootRepository) SetSetting(key string, value string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("setting key is required")
+	}
+	return r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+	}).Create(&chatwoot_model.ConnectorSetting{Key: key, Value: value}).Error
 }
 
 func (r *chatwootRepository) remoteJIDLookupColumns() []string {

@@ -178,6 +178,25 @@
       </nav>
 
       <div class="content">
+        <section id="watchdogCard" class="card hidden">
+          <div class="card-head">
+            <div>
+              <h3>Monitoramento de instâncias (watchdog)</h3>
+              <p class="card-sub">Envia uma mensagem automática para o próprio número a cada 15 minutos e gera um alerta nos logs se o WhatsApp parar de entregar mensagens para o aparelho vinculado (sessão zumbi). Desative aqui se notar qualquer problema.</p>
+            </div>
+            <div class="switch-wrap"><span>Watchdog ativo</span><label class="switch"><input id="watchdogEnabled" type="checkbox"><span class="slider"></span></label></div>
+          </div>
+          <div class="field full">
+            <label class="label" for="watchdogWebhook">Webhook de alerta (opcional)</label>
+            <div class="input-action">
+              <input id="watchdogWebhook" type="url" placeholder="https://seu-servidor.com/webhook-de-alerta">
+              <button id="watchdogSaveBtn" class="btn" type="button">Salvar</button>
+            </div>
+            <p class="hint">Recebe um POST em JSON quando uma instância para de responder ao probe (sessão zumbi). Deixe vazio para desativar o envio.</p>
+          </div>
+          <div id="watchdogStatus" class="card-sub"></div>
+        </section>
+
         <section id="empty" class="empty">
           <div><strong>Nenhuma instância selecionada</strong>As instâncias criadas na Evolution aparecerão automaticamente aqui.</div>
         </section>
@@ -648,6 +667,69 @@
         }
       }
 
+      async function loadWatchdog() {
+        try {
+          const response = await api('/watchdog');
+          const data = response.data || {};
+          $('watchdogCard').classList.remove('hidden');
+          $('watchdogEnabled').checked = Boolean(data.enabled);
+          if (document.activeElement !== $('watchdogWebhook')) {
+            $('watchdogWebhook').value = data.webhookUrl || '';
+          }
+          renderWatchdogStatus(data);
+        } catch (_) {
+          // Versões antigas do conector não expõem o watchdog.
+        }
+      }
+
+      function renderWatchdogStatus(data) {
+        const container = $('watchdogStatus');
+        container.replaceChildren();
+        const instances = data.instances || [];
+        if (!instances.length) {
+          container.textContent = data.enabled
+            ? 'Nenhum probe enviado ainda. O primeiro ciclo roda 1 minuto após a ativação.'
+            : 'Monitoramento desativado.';
+          return;
+        }
+        const formatTime = value => value ? new Date(value).toLocaleString('pt-BR') : '—';
+        instances
+          .slice()
+          .sort((a, b) => (a.instanceName || a.instanceId).localeCompare(b.instanceName || b.instanceId))
+          .forEach(item => {
+            const line = document.createElement('div');
+            const state = item.pendingProbe ? 'aguardando eco' : (item.lastAckAt ? 'ok' : 'sem dados');
+            line.textContent = `${item.instanceName || item.instanceId}: ${state} · último probe ${formatTime(item.lastProbeAt)} · último eco ${formatTime(item.lastAckAt)}` + (item.lastAlertAt ? ` · ÚLTIMO ALERTA ${formatTime(item.lastAlertAt)}` : '');
+            container.append(line);
+          });
+      }
+
+      async function saveWatchdog(enabled) {
+        const payload = { enabled: enabled ?? $('watchdogEnabled').checked, webhookUrl: $('watchdogWebhook').value.trim() };
+        await api('/watchdog', { method: 'PUT', body: JSON.stringify(payload) });
+        await loadWatchdog();
+      }
+
+      $('watchdogEnabled').addEventListener('change', async event => {
+        const enabled = event.target.checked;
+        try {
+          await saveWatchdog(enabled);
+          toast(enabled ? 'Watchdog ativado. O primeiro probe sai em até 1 minuto.' : 'Watchdog desativado.');
+        } catch (error) {
+          event.target.checked = !enabled;
+          toast(error.message, true);
+        }
+      });
+
+      $('watchdogSaveBtn').addEventListener('click', async () => {
+        try {
+          await saveWatchdog();
+          toast('Configuração do watchdog salva.');
+        } catch (error) {
+          toast(error.message, true);
+        }
+      });
+
       $('loginForm').addEventListener('submit', async event => {
         event.preventDefault();
         state.key = $('apiKey').value.trim();
@@ -655,6 +737,7 @@
         $('loginError').textContent = '';
         try {
           await loadInstances();
+          loadWatchdog();
           sessionStorage.setItem('connectorApiKey', state.key);
           $('loginOverlay').classList.add('hidden');
           $('apiKey').value = '';
@@ -677,6 +760,7 @@
         if (!state.key || document.hidden) return;
         try {
           await loadInstances(false);
+          loadWatchdog();
           const editingProxy = state.activeTab === 'proxy' && $('proxyForm').contains(document.activeElement);
           if (state.selected && state.activeTab === 'proxy' && !editingProxy) {
             await loadProxy(state.selected);
@@ -689,6 +773,7 @@
       if (state.key) {
         $('loginOverlay').classList.add('hidden');
         loadInstances().catch(error => toast(error.message, true));
+        loadWatchdog();
       }
     })();
   </script>

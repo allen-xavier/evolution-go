@@ -767,6 +767,11 @@ func (s *chatwootService) syncEvolutionEventToChatwoot(evt chatwootEvent) error 
 		return nil
 	}
 
+	// Watchdog self-message probes must never reach Chatwoot.
+	if message.FromMe && strings.Contains(message.Content, chatwoot_model.WatchdogProbeMarker) {
+		return nil
+	}
+
 	if message.RemoteJID == "" {
 		return nil
 	}
