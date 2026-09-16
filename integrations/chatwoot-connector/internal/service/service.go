@@ -2505,9 +2505,35 @@ func recipientForSend(remoteJID string) (string, *bool) {
 		return remoteJID, &formatFalse
 	}
 	if idx := strings.Index(remoteJID, "@"); idx > 0 {
-		return strings.TrimPrefix(remoteJID[:idx], "+"), nil
+		number := strings.TrimPrefix(remoteJID[:idx], "+")
+		if isBrazilianMobileWithNinthDigit(number) {
+			return number, &formatFalse
+		}
+		return number, nil
 	}
-	return strings.TrimPrefix(remoteJID, "+"), nil
+	number := strings.TrimPrefix(remoteJID, "+")
+	if isBrazilianMobileWithNinthDigit(number) {
+		return number, &formatFalse
+	}
+	return number, nil
+}
+
+func isBrazilianMobileWithNinthDigit(number string) bool {
+	if len(number) != 13 || !strings.HasPrefix(number, "55") || number[4] != '9' {
+		return false
+	}
+
+	ddd, err := strconv.Atoi(number[2:4])
+	if err != nil || ddd < 31 || ddd > 99 {
+		return false
+	}
+
+	for _, digit := range number {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func chatwootOutboundMessageID(instanceID string, chatwootMessageID string, part string) string {

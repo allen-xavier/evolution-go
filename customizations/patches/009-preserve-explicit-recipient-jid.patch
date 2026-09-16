@@ -1,0 +1,60 @@
+diff --git a/pkg/sendMessage/service/send_service.go b/pkg/sendMessage/service/send_service.go
+index c6ecdcd..8ee86fb 100644
+--- a/pkg/sendMessage/service/send_service.go
++++ b/pkg/sendMessage/service/send_service.go
+@@ -479,9 +479,22 @@ func validateMessageFields(phone string, formatJid *bool, messageID *string, par
+ 		finalPhone = phone
+ 	}
+ 
+-	recipient, ok := utils.ParseJID(finalPhone)
+-	if !ok {
+-		return types.NewJID("", types.DefaultUserServer), errors.New("could not parse formatted phone")
++	var recipient types.JID
++	if shouldFormat {
++		var ok bool
++		recipient, ok = utils.ParseJID(finalPhone)
++		if !ok {
++			return types.NewJID("", types.DefaultUserServer), errors.New("could not parse formatted phone")
++		}
++	} else {
++		if !strings.Contains(finalPhone, "@") {
++			finalPhone = strings.TrimPrefix(finalPhone, "+") + "@" + types.DefaultUserServer
++		}
++		var err error
++		recipient, err = types.ParseJID(finalPhone)
++		if err != nil || recipient.User == "" {
++			return types.NewJID("", types.DefaultUserServer), errors.New("could not parse unformatted phone")
++		}
+ 	}
+ 
+ 	if messageID != nil {
+diff --git a/pkg/sendMessage/service/send_service_test.go b/pkg/sendMessage/service/send_service_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/sendMessage/service/send_service_test.go
+@@ -0,0 +1,25 @@
++package send_service
++
++import "testing"
++
++func TestValidateMessageFieldsWithFormatJIDFalsePreservesBrazilianNinthDigit(t *testing.T) {
++	formatJID := false
++	recipient, err := validateMessageFields("5583921604543", &formatJID, nil, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := recipient.String(); got != "5583921604543@s.whatsapp.net" {
++		t.Fatalf("recipient = %q, want %q", got, "5583921604543@s.whatsapp.net")
++	}
++}
++
++func TestValidateMessageFieldsWithFormatJIDTrueKeepsLegacyBrazilianFormatting(t *testing.T) {
++	formatJID := true
++	recipient, err := validateMessageFields("5583921604543", &formatJID, nil, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := recipient.String(); got != "+558321604543@s.whatsapp.net" {
++		t.Fatalf("recipient = %q, want legacy fallback %q", got, "+558321604543@s.whatsapp.net")
++	}
++}

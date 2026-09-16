@@ -569,6 +569,24 @@ func TestChatwootSourceIDAndRecipientForSend(t *testing.T) {
 		t.Fatal("expected nil formatJid for normal phone sends")
 	}
 
+	brazilianMobile := "5583921604543@s.whatsapp.net"
+	number, formatJID = recipientForSend(brazilianMobile)
+	if number != "5583921604543" {
+		t.Fatalf("unexpected Brazilian mobile recipient: %s", number)
+	}
+	if formatJID == nil || *formatJID {
+		t.Fatal("expected formatJid=false for Brazilian mobile with ninth digit")
+	}
+
+	foreignMobile := "351932933862@s.whatsapp.net"
+	number, formatJID = recipientForSend(foreignMobile)
+	if number != "351932933862" {
+		t.Fatalf("unexpected foreign recipient: %s", number)
+	}
+	if formatJID != nil {
+		t.Fatal("expected foreign recipient formatting to remain unchanged")
+	}
+
 	lid := "28462999949545@lid"
 	lidSourceID := chatwootSourceID(instanceID, lid)
 	expectedLIDSourceID := instanceID + ":lid:" + lid
