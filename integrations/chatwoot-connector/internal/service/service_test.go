@@ -61,6 +61,10 @@ func (f *outboundFakeEvolution) ReconnectInstance(context.Context, string) error
 	return f.reconnectErr
 }
 
+func (*outboundFakeEvolution) CheckNumbers(context.Context, string, []string) ([]evolution.NumberCheck, error) {
+	return nil, nil
+}
+
 type identityMemoryRepository struct {
 	configs  map[string]*model.ChatwootConfig
 	bindings map[string]*model.ChatwootBinding

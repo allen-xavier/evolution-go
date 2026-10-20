@@ -48,6 +48,15 @@ type ProxyConfig struct {
 	Password string `json:"password"`
 }
 
+// NumberCheck is the result of asking WhatsApp whether a phone number has an account.
+type NumberCheck struct {
+	Query        string `json:"query"`
+	OnWhatsApp   bool   `json:"onWhatsapp"`
+	JID          string `json:"jid"`
+	RemoteJID    string `json:"remoteJid"`
+	VerifiedName string `json:"verifiedName"`
+}
+
 type API interface {
 	GetInstance(ctx context.Context, instanceID string) (*Instance, error)
 	ListInstances(ctx context.Context) ([]Instance, error)
@@ -57,6 +66,7 @@ type API interface {
 	RemoveProxy(ctx context.Context, instanceID string) error
 	DisconnectInstance(ctx context.Context, instanceID string) error
 	ReconnectInstance(ctx context.Context, instanceID string) error
+	CheckNumbers(ctx context.Context, instanceID string, numbers []string) ([]NumberCheck, error)
 }
 
 type Client struct {
@@ -217,6 +227,70 @@ func (c *Client) ReconnectInstance(ctx context.Context, instanceID string) error
 	}
 	req.Header.Set("apikey", instance.Token)
 	return c.do(req)
+}
+
+// CheckNumbers asks WhatsApp, through the given instance, which numbers have an account.
+// Evolution's /user/check needs the instance token, so it is looked up with the global key.
+func (c *Client) CheckNumbers(ctx context.Context, instanceID string, numbers []string) ([]NumberCheck, error) {
+	instance, err := c.GetInstance(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	// formatJid=true makes Evolution try the formatted number first and retry the raw one
+	// for numbers it did not find (covers Brazilian mobiles with and without the extra 9).
+	body, err := json.Marshal(map[string]interface{}{"number": numbers, "formatJid": true})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/user/check", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", instance.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("evolution number check failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("evolution number check failed [%d]: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result struct {
+		Data *struct {
+			Users []struct {
+				Query        string `json:"Query"`
+				IsInWhatsapp bool   `json:"IsInWhatsapp"`
+				JID          string `json:"JID"`
+				RemoteJID    string `json:"RemoteJID"`
+				VerifiedName string `json:"VerifiedName"`
+			} `json:"Users"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("invalid evolution number check response: %w", err)
+	}
+	// Evolution answers 200 with an empty body when the instance could not reach WhatsApp.
+	if result.Data == nil {
+		return nil, fmt.Errorf("evolution number check returned no result (instance offline?)")
+	}
+	checks := make([]NumberCheck, 0, len(result.Data.Users))
+	for _, user := range result.Data.Users {
+		checks = append(checks, NumberCheck{
+			Query:        user.Query,
+			OnWhatsApp:   user.IsInWhatsapp,
+			JID:          user.JID,
+			RemoteJID:    user.RemoteJID,
+			VerifiedName: user.VerifiedName,
+		})
+	}
+	return checks, nil
 }
 
 func (c *Client) SendMedia(ctx context.Context, instance *Instance, payload MediaRequest) error {

@@ -47,6 +47,53 @@ func (fakeEvolution) SetProxy(context.Context, string, evolution.ProxyConfig) er
 func (fakeEvolution) RemoveProxy(context.Context, string) error                     { return nil }
 func (fakeEvolution) DisconnectInstance(context.Context, string) error              { return nil }
 func (fakeEvolution) ReconnectInstance(context.Context, string) error               { return nil }
+func (fakeEvolution) CheckNumbers(_ context.Context, instanceID string, numbers []string) ([]evolution.NumberCheck, error) {
+	checks := make([]evolution.NumberCheck, 0, len(numbers))
+	for _, number := range numbers {
+		checks = append(checks, evolution.NumberCheck{
+			Query:      number,
+			OnWhatsApp: number == "5531999990000",
+			RemoteJID:  "553199990000@s.whatsapp.net",
+			JID:        instanceID,
+		})
+	}
+	return checks, nil
+}
+
+func TestCheckNumbersRequiresAdminKeyAndAnswersPerNumber(t *testing.T) {
+	router := New(fakeService{}, fakeEvolution{}, nil, nil, "global-key")
+
+	unauthorized := httptest.NewRecorder()
+	router.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/chatwoot/check/instance-1",
+		strings.NewReader(`{"numbers":["5531999990000"]}`)))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized response, got %d", unauthorized.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/chatwoot/check/instance-1",
+		strings.NewReader(`{"numbers":["5531999990000"," ","5531888880000"]}`))
+	request.Header.Set("apikey", "global-key")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"query":"5531999990000","onWhatsapp":true,"jid":"instance-1"`) ||
+		!strings.Contains(body, `"query":"5531888880000","onWhatsapp":false`) ||
+		strings.Count(body, `"query"`) != 2 {
+		t.Fatalf("unexpected response: %s", body)
+	}
+
+	empty := httptest.NewRequest(http.MethodPost, "/chatwoot/check/instance-1", strings.NewReader(`{"numbers":[]}`))
+	empty.Header.Set("apikey", "global-key")
+	emptyResponse := httptest.NewRecorder()
+	router.ServeHTTP(emptyResponse, empty)
+	if emptyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for empty list, got %d", emptyResponse.Code)
+	}
+}
 
 func TestUIIsServedWithoutExposingTheAdminAPI(t *testing.T) {
 	router := New(fakeService{}, fakeEvolution{}, nil, nil, "global-key")

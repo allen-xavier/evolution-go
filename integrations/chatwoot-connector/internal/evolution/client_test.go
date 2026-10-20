@@ -90,6 +90,63 @@ func TestReconnectInstanceUsesInstanceToken(t *testing.T) {
 	}
 }
 
+func TestCheckNumbersUsesInstanceTokenAndMapsResult(t *testing.T) {
+	var checkBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/instance/info/instance-1":
+			_, _ = io.WriteString(w, `{"data":{"id":"instance-1","token":"instance-token"}}`)
+		case "/user/check":
+			if r.Method != http.MethodPost || r.Header.Get("apikey") != "instance-token" {
+				t.Fatalf("unexpected check request: %s key=%s", r.Method, r.Header.Get("apikey"))
+			}
+			raw, _ := io.ReadAll(r.Body)
+			checkBody = string(raw)
+			_, _ = io.WriteString(w, `{"message":"success","data":{"Users":[
+				{"Query":"5531999990000","IsInWhatsapp":true,"JID":"553199990000@s.whatsapp.net","RemoteJID":"553199990000@s.whatsapp.net","LID":null,"VerifiedName":"Loja"},
+				{"Query":"5531888880000","IsInWhatsapp":false,"JID":"","RemoteJID":"5531888880000","LID":null,"VerifiedName":""}]}}`)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "global-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := client.CheckNumbers(context.Background(), "instance-1", []string{"5531999990000", "5531888880000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkBody != `{"formatJid":true,"number":["5531999990000","5531888880000"]}` {
+		t.Fatalf("unexpected check body: %s", checkBody)
+	}
+	if len(checks) != 2 || !checks[0].OnWhatsApp || checks[0].RemoteJID != "553199990000@s.whatsapp.net" ||
+		checks[0].VerifiedName != "Loja" || checks[1].OnWhatsApp {
+		t.Fatalf("unexpected checks: %+v", checks)
+	}
+}
+
+func TestCheckNumbersFailsWhenEvolutionReturnsNoData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/instance/info/instance-1" {
+			_, _ = io.WriteString(w, `{"data":{"id":"instance-1","token":"instance-token"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"message":"success","data":null}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "global-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CheckNumbers(context.Background(), "instance-1", []string{"5531999990000"}); err == nil {
+		t.Fatal("expected an error when Evolution returns no data")
+	}
+}
+
 func TestListInstancesUsesGlobalAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/instance/all" {

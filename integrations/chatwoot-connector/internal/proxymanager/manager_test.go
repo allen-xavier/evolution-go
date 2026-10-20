@@ -73,6 +73,9 @@ func (f *fakeEvolution) DisconnectInstance(_ context.Context, instanceID string)
 	return nil
 }
 func (*fakeEvolution) ReconnectInstance(context.Context, string) error { return nil }
+func (*fakeEvolution) CheckNumbers(context.Context, string, []string) ([]evolution.NumberCheck, error) {
+	return nil, nil
+}
 
 type monitorRepository struct {
 	configs []InstanceProxy

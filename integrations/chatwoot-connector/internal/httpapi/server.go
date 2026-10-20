@@ -52,6 +52,7 @@ func New(service chatwoot_service.ChatwootService, evolutionAPI evolution.API, p
 	protected.POST("/set/:instanceId", setHandler(service))
 	protected.GET("/find/:instanceId", findHandler(service))
 	protected.GET("/instances", instancesHandler(evolutionAPI))
+	protected.POST("/check/:instanceId", checkNumbersHandler(evolutionAPI))
 	protected.GET("/proxy/:instanceId", getProxyHandler(proxyManager))
 	protected.PUT("/proxy/:instanceId", setProxyHandler(proxyManager))
 	protected.DELETE("/proxy/:instanceId", removeProxyHandler(proxyManager))
@@ -176,6 +177,39 @@ func instancesHandler(evolutionAPI evolution.API) gin.HandlerFunc {
 			})
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "success", "data": views})
+	}
+}
+
+const maxCheckNumbers = 10
+
+// checkNumbersHandler tells whether phone numbers have WhatsApp, asking through the given
+// instance (the one that will message them). Used by XavierChat before starting a conversation.
+func checkNumbersHandler(evolutionAPI evolution.API) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		instanceID := strings.TrimSpace(c.Param("instanceId"))
+		var payload struct {
+			Numbers []string `json:"numbers"`
+		}
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		numbers := make([]string, 0, len(payload.Numbers))
+		for _, number := range payload.Numbers {
+			if number = strings.TrimSpace(number); number != "" {
+				numbers = append(numbers, number)
+			}
+		}
+		if instanceID == "" || len(numbers) == 0 || len(numbers) > maxCheckNumbers {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "instanceId and 1 to 10 numbers are required"})
+			return
+		}
+		checks, err := evolutionAPI.CheckNumbers(c.Request.Context(), instanceID, numbers)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "success", "data": checks})
 	}
 }
 

@@ -80,6 +80,9 @@ func (f *fakeEvolution) DisconnectInstance(ctx context.Context, instanceID strin
 func (f *fakeEvolution) ReconnectInstance(ctx context.Context, instanceID string) error {
 	return fmt.Errorf("not implemented")
 }
+func (f *fakeEvolution) CheckNumbers(ctx context.Context, instanceID string, numbers []string) ([]evolution.NumberCheck, error) {
+	return nil, fmt.Errorf("not implemented")
+}
 
 func newTestWatchdog(settings *fakeSettings, evolutionAPI *fakeEvolution) *Watchdog {
 	w := New(settings, &fakeConfigs{enabled: map[string]bool{"inst-1": true}}, evolutionAPI, nil)
