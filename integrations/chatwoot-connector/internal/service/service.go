@@ -155,8 +155,14 @@ type chatwootWebhookPayload struct {
 		ID           int `json:"id"`
 		InboxID      int `json:"inbox_id"`
 		ContactInbox struct {
-			SourceID string `json:"source_id"`
+			SourceID  string `json:"source_id"`
+			ContactID int    `json:"contact_id"`
 		} `json:"contact_inbox"`
+		Meta struct {
+			Sender struct {
+				ID int `json:"id"`
+			} `json:"sender"`
+		} `json:"meta"`
 	} `json:"conversation"`
 	Sender struct {
 		Type string `json:"type"`
@@ -425,6 +431,7 @@ func (s *chatwootService) deliverChatwootPayload(
 	if binding != nil {
 		remoteJID = binding.RemoteJID
 	}
+	startedInChatwoot := binding == nil
 	if remoteJID == "" {
 		remoteJID = remoteJIDFromSourceID(instanceID, payload.Conversation.ContactInbox.SourceID)
 	}
@@ -487,7 +494,66 @@ func (s *chatwootService) deliverChatwootPayload(
 		return fmt.Errorf("failed to deliver chatwoot message %s: %s", chatwootMessageID, strings.Join(sendErrors, " | "))
 	}
 
+	if startedInChatwoot {
+		s.rememberChatwootStartedConversation(instanceID, remoteJID, payload)
+	}
+
 	return nil
+}
+
+// rememberChatwootStartedConversation records the binding of a conversation that
+// was created directly in Chatwoot (by an agent, or by XavierChat when it moves a
+// conversation to another WhatsApp number). Without it, the contact's reply to
+// this number would not find the conversation and a new one would be created.
+// The binding of this number then points to the conversation the agent is using.
+func (s *chatwootService) rememberChatwootStartedConversation(
+	instanceID string,
+	remoteJID string,
+	payload chatwootWebhookPayload,
+) {
+	conversationID := payload.Conversation.ID
+	remoteJID = normalizeRemoteJID(remoteJID)
+	if conversationID <= 0 || remoteJID == "" {
+		return
+	}
+	logger := s.loggerWrapper.GetLogger(instanceID)
+
+	binding, err := s.repository.GetBindingByRemoteJID(instanceID, remoteJID)
+	if err != nil {
+		logger.LogWarn("[%s] Could not load binding for %s after Chatwoot-started send: %v", instanceID, remoteJID, err)
+		return
+	}
+	if binding != nil && binding.ConversationID == conversationID {
+		return
+	}
+
+	previousConversationID := 0
+	if binding == nil {
+		binding = &chatwoot_model.ChatwootBinding{InstanceID: instanceID, RemoteJID: remoteJID}
+	} else {
+		previousConversationID = binding.ConversationID
+	}
+	binding.ConversationID = conversationID
+	if contactID := payload.Conversation.ContactInbox.ContactID; contactID > 0 {
+		binding.ContactID = contactID
+	} else if contactID := payload.Conversation.Meta.Sender.ID; contactID > 0 {
+		binding.ContactID = contactID
+	}
+	if sourceID := strings.TrimSpace(payload.Conversation.ContactInbox.SourceID); sourceID != "" {
+		binding.SourceID = sourceID
+	}
+
+	if err := s.repository.SaveBinding(binding); err != nil {
+		logger.LogWarn("[%s] Could not bind %s to Chatwoot-started conversation %d: %v", instanceID, remoteJID, conversationID, err)
+		return
+	}
+	logger.LogInfo(
+		"[%s] Bound %s to Chatwoot-started conversation %d (previous conversation %d)",
+		instanceID,
+		remoteJID,
+		conversationID,
+		previousConversationID,
+	)
 }
 
 func (s *chatwootService) Run(ctx context.Context) {

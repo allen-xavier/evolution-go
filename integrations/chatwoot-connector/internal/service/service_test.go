@@ -1246,6 +1246,107 @@ func TestFailedChatwootSendIsPersistedAndRetried(t *testing.T) {
 	}
 }
 
+func chatwootStartedWebhook(conversationID int, sourceID string) []byte {
+	return []byte(fmt.Sprintf(`{
+		"event": "message_created",
+		"id": 31000%d,
+		"content": "Oi, aqui é a Michele, seguimos por este número",
+		"message_type": "outgoing",
+		"private": false,
+		"conversation": {
+			"id": %d,
+			"inbox_id": 7,
+			"contact_inbox": {"source_id": %q, "contact_id": 77},
+			"meta": {"sender": {"id": 77}}
+		},
+		"sender": {"type": "user", "name": "Atendente"}
+	}`, conversationID, conversationID, sourceID))
+}
+
+func TestChatwootStartedConversationIsBoundAfterSend(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "553199990986@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+
+	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(500, instanceID+":"+remoteJID)); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	if evolutionAPI.textCalls != 1 {
+		t.Fatalf("expected the message to be sent once, got %d", evolutionAPI.textCalls)
+	}
+	binding := repository.bindings[identityKey(instanceID, remoteJID)]
+	if binding == nil {
+		t.Fatalf("expected a binding for the contact after the send")
+	}
+	if binding.ConversationID != 500 || binding.ContactID != 77 || binding.SourceID != instanceID+":"+remoteJID {
+		t.Fatalf("unexpected binding: %#v", binding)
+	}
+
+	// A resposta do cliente para este número encontra a mesma conversa.
+	found, err := repository.GetBindingByRemoteJID(instanceID, remoteJID)
+	if err != nil || found == nil || found.ConversationID != 500 {
+		t.Fatalf("reply should resolve to conversation 500, got %#v (err %v)", found, err)
+	}
+}
+
+func TestChatwootStartedConversationTakesOverOldBinding(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "553199990986@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {
+				ID: 9, InstanceID: instanceID, RemoteJID: remoteJID, ConversationID: 91, ContactID: 77,
+			},
+		},
+	}
+	service := NewChatwootService(repository, &outboundFakeEvolution{}, nil, testLoggerManager()).(*chatwootService)
+
+	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(501, instanceID+":"+remoteJID)); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	binding := repository.bindings[identityKey(instanceID, remoteJID)]
+	if binding == nil || binding.ID != 9 || binding.ConversationID != 501 {
+		t.Fatalf("existing binding should now point to conversation 501: %#v", binding)
+	}
+	if len(repository.bindings) != 1 {
+		t.Fatalf("expected a single binding for the contact, got %d", len(repository.bindings))
+	}
+}
+
+func TestBoundConversationSendKeepsBindingAndFailedSendDoesNotBind(t *testing.T) {
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "553199990986@s.whatsapp.net"
+	)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7},
+		},
+	}
+	evolutionAPI := &outboundFakeEvolution{sendTextErr: errors.New("server returned error 463")}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+
+	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(502, instanceID+":"+remoteJID)); err != nil {
+		t.Fatalf("failed send should be queued, got: %v", err)
+	}
+	if len(repository.bindings) != 0 {
+		t.Fatalf("a failed send must not create a binding: %#v", repository.bindings)
+	}
+}
+
 func TestUnregisteredWhatsAppNumberIsRetainedWithoutRetry(t *testing.T) {
 	const (
 		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
