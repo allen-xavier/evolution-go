@@ -1991,7 +1991,7 @@ func (s *chatwootService) extractEvolutionMessage(payload evolutionWebhookPayloa
 
 	info := mapFromAny(mapLookup(data, "Info", "info"))
 	messageMap := mapFromAny(mapLookup(data, "Message", "message"))
-	if isWhatsAppProtocolMessage(messageMap) {
+	if isWhatsAppProtocolMessage(messageMap) || isWhatsAppReactionMessage(messageMap) {
 		return evolutionMessage{}, false
 	}
 
@@ -2224,6 +2224,16 @@ func (s *chatwootService) logQuoteResolution(instanceID string, message evolutio
 
 func isWhatsAppProtocolMessage(messageMap map[string]interface{}) bool {
 	return mapLookup(messageMap, "protocolMessage", "ProtocolMessage") != nil
+}
+
+func isWhatsAppReactionMessage(messageMap map[string]interface{}) bool {
+	return mapLookup(
+		messageMap,
+		"reactionMessage",
+		"ReactionMessage",
+		"encReactionMessage",
+		"EncReactionMessage",
+	) != nil
 }
 
 func isEvolutionMessageSourceID(sourceID string) bool {

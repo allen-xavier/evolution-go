@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -311,6 +312,60 @@ func TestExtractEvolutionProtocolMessagesAreIgnored(t *testing.T) {
 			}
 			if message, ok := service.extractEvolutionMessage(payload, raw); ok {
 				t.Fatalf("protocol message must not be synchronized as a visible Chatwoot message: %#v", message)
+			}
+		})
+	}
+}
+
+func TestExtractEvolutionReactionMessagesAreIgnored(t *testing.T) {
+	service := &chatwootService{
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+
+	tests := []struct {
+		name    string
+		message string
+		fromMe  bool
+	}{
+		{
+			name:    "incoming emoji reaction",
+			message: `{"reactionMessage":{"key":{"id":"ORIGINAL-1"},"text":"👍"}}`,
+		},
+		{
+			name:    "reaction removal",
+			message: `{"reactionMessage":{"key":{"id":"ORIGINAL-1"},"text":""}}`,
+		},
+		{
+			name:    "encrypted reaction",
+			message: `{"encReactionMessage":{"targetMessageKey":{"id":"ORIGINAL-1"},"encPayload":"AQID"}}`,
+		},
+		{
+			name:    "outgoing reaction",
+			message: `{"ReactionMessage":{"key":{"id":"ORIGINAL-1"},"text":"❤️"}}`,
+			fromMe:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"event": "Message",
+				"data": {
+					"Info": {
+						"Chat": "553193291010@s.whatsapp.net",
+						"ID": "REACTION-1",
+						"IsFromMe": %t
+					},
+					"Message": %s
+				}
+			}`, tt.fromMe, tt.message))
+
+			var payload evolutionWebhookPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if message, ok := service.extractEvolutionMessage(payload, raw); ok {
+				t.Fatalf("reaction must not be synchronized as a visible Chatwoot message: %#v", message)
 			}
 		})
 	}
