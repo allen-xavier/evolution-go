@@ -25,10 +25,18 @@ type outboundFakeEvolution struct {
 	textCalls      int
 	reconnectErr   error
 	reconnectCalls int
+	disconnected   bool
 }
 
 func (f *outboundFakeEvolution) GetInstance(context.Context, string) (*evolution.Instance, error) {
-	return &evolution.Instance{Id: "eef4c22f-766f-4c77-a376-52219f57adfc", Token: "token", Connected: true}, nil
+	return &evolution.Instance{
+		Id:               "eef4c22f-766f-4c77-a376-52219f57adfc",
+		Name:             "Michele5",
+		Jid:              "553121202418:18@s.whatsapp.net",
+		Token:            "token",
+		Connected:        !f.disconnected,
+		DisconnectReason: "QR code limit reached (5)",
+	}, nil
 }
 
 func (*outboundFakeEvolution) ListInstances(context.Context) ([]evolution.Instance, error) {
@@ -2034,5 +2042,180 @@ func TestQuotedReplyToOutgoingChatwootMessageFallsBackToText(t *testing.T) {
 	}
 	if created["content"] != "Mensagem citada: Segue o boleto\nperfeito, obrigado" {
 		t.Fatalf("unexpected content: %#v", created["content"])
+	}
+}
+
+// chatwootNoteRecorder is a fake Chatwoot API that records the private notes.
+type chatwootNoteRecorder struct {
+	server *httptest.Server
+	notes  []string
+}
+
+func newChatwootNoteRecorder(t *testing.T, conversationID int) *chatwootNoteRecorder {
+	t.Helper()
+	recorder := &chatwootNoteRecorder{}
+	recorder.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != fmt.Sprintf("/api/v1/accounts/1/conversations/%d/messages", conversationID) {
+			http.Error(w, "unexpected route", http.StatusNotFound)
+			return
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode note: %v", err)
+		}
+		if body["private"] != true {
+			t.Errorf("delivery note must be private: %#v", body)
+		}
+		recorder.notes = append(recorder.notes, fmt.Sprint(body["content"]))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(recorder.server.Close)
+	return recorder
+}
+
+func disconnectedTestSetup(t *testing.T) (*chatwootService, *identityMemoryRepository, *outboundFakeEvolution, *chatwootNoteRecorder) {
+	t.Helper()
+	const (
+		instanceID = "eef4c22f-766f-4c77-a376-52219f57adfc"
+		remoteJID  = "5516991635281@s.whatsapp.net"
+	)
+	notes := newChatwootNoteRecorder(t, 91)
+	repository := &identityMemoryRepository{
+		configs: map[string]*model.ChatwootConfig{
+			instanceID: {InstanceID: instanceID, Enabled: true, InboxID: 7, AccountID: "1", URL: notes.server.URL, Token: "t"},
+		},
+		bindings: map[string]*model.ChatwootBinding{
+			identityKey(instanceID, remoteJID): {ID: 1, InstanceID: instanceID, RemoteJID: remoteJID, ConversationID: 91},
+		},
+		jobs: map[uint]*model.ChatwootOutboundJob{},
+	}
+	evolutionAPI := &outboundFakeEvolution{disconnected: true}
+	service := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
+	return service, repository, evolutionAPI, notes
+}
+
+func storedOutboundJob(t *testing.T, repository *identityMemoryRepository, createdAt time.Time) *model.ChatwootOutboundJob {
+	t.Helper()
+	job := &model.ChatwootOutboundJob{
+		ID: 1, InstanceID: "eef4c22f-766f-4c77-a376-52219f57adfc", ChatwootMessageID: "260001", CreatedAt: createdAt,
+		Payload: []byte(`{
+			"event":"message_created", "id":260001, "content":"Seu horário está confirmado para amanhã",
+			"message_type":"outgoing", "private":false,
+			"conversation":{"id":91,"inbox_id":7,"contact_inbox":{"source_id":"unused"}},
+			"sender":{"type":"user","name":"Atendente"}
+		}`),
+	}
+	repository.jobs[job.ID] = job
+	return job
+}
+
+func TestDisconnectedInstanceIsNotAskedToSend(t *testing.T) {
+	service, repository, evolutionAPI, notes := disconnectedTestSetup(t)
+	body := []byte(`{
+		"event":"message_created", "id":260000, "content":"oi",
+		"message_type":"outgoing", "private":false,
+		"conversation":{"id":91,"inbox_id":7,"contact_inbox":{"source_id":"unused"}},
+		"sender":{"type":"user","name":"Atendente"}
+	}`)
+	if err := service.HandleWebhook("eef4c22f-766f-4c77-a376-52219f57adfc", nil, body); err != nil {
+		t.Fatal(err)
+	}
+	if evolutionAPI.textCalls != 0 {
+		t.Fatalf("a disconnected instance must not be asked to send (it would enter the QR flow), got %d calls", evolutionAPI.textCalls)
+	}
+	if len(repository.jobs) != 1 {
+		t.Fatalf("the reply should wait in the queue, got %d jobs", len(repository.jobs))
+	}
+	for _, job := range repository.jobs {
+		if job.FailedAt != nil {
+			t.Fatalf("a disconnected instance is not a terminal failure: %#v", job)
+		}
+		if wait := time.Until(job.NextAttemptAt); wait < 50*time.Second || wait > 70*time.Second {
+			t.Fatalf("next check should be in about a minute, got %s", wait)
+		}
+	}
+	if len(notes.notes) != 0 {
+		t.Fatalf("short disconnections must not notify agents, got %q", notes.notes)
+	}
+}
+
+func TestWaitingReplyNotifiesOnceAndIsDeliveredWhenNumberReturns(t *testing.T) {
+	service, repository, evolutionAPI, notes := disconnectedTestSetup(t)
+	job := storedOutboundJob(t, repository, time.Now().Add(-3*time.Minute))
+
+	service.processOutboundJob(job)
+	service.processOutboundJob(job)
+	if evolutionAPI.textCalls != 0 {
+		t.Fatalf("still disconnected: no send expected, got %d", evolutionAPI.textCalls)
+	}
+	if len(notes.notes) != 1 || !strings.Contains(notes.notes[0], "⏳") || !strings.Contains(notes.notes[0], "Michele5 (553121202418)") {
+		t.Fatalf("expected one waiting note naming the number, got %q", notes.notes)
+	}
+	if job.AgentNotifiedAt == nil {
+		t.Fatal("job should remember that the agents were notified")
+	}
+
+	evolutionAPI.disconnected = false
+	service.processOutboundJob(job)
+	if evolutionAPI.textCalls != 1 {
+		t.Fatalf("reply should be sent once the number is back, got %d", evolutionAPI.textCalls)
+	}
+	if len(repository.jobs) != 0 {
+		t.Fatalf("delivered job should be removed: %#v", repository.jobs)
+	}
+	if len(notes.notes) != 2 || !strings.Contains(notes.notes[1], "✅") {
+		t.Fatalf("expected a delivered note, got %q", notes.notes)
+	}
+}
+
+func TestReplyOlderThanOneHourIsDroppedWithNote(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		disconnected bool
+		want         string
+	}{
+		{"number still down", true, "WhatsApp Michele5 (553121202418) ficou desconectado"},
+		{"number came back late", false, "falhou por mais de 1 hora"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, repository, evolutionAPI, notes := disconnectedTestSetup(t)
+			evolutionAPI.disconnected = tc.disconnected
+			job := storedOutboundJob(t, repository, time.Now().Add(-61*time.Minute))
+
+			service.processOutboundJob(job)
+			if evolutionAPI.textCalls != 0 {
+				t.Fatalf("a reply older than one hour must not be sent, got %d calls", evolutionAPI.textCalls)
+			}
+			stored := repository.jobs[job.ID]
+			if stored == nil || stored.FailedAt == nil {
+				t.Fatalf("expired job should be kept as a terminal failure: %#v", stored)
+			}
+			if len(notes.notes) != 1 || !strings.Contains(notes.notes[0], "❌") || !strings.Contains(notes.notes[0], tc.want) ||
+				!strings.Contains(notes.notes[0], "Seu horário está confirmado") {
+				t.Fatalf("unexpected note: %q", notes.notes)
+			}
+			due, _ := repository.ListDueOutboundJobs(time.Now().Add(time.Hour), 20)
+			if len(due) != 0 {
+				t.Fatalf("expired job must not be retried: %#v", due)
+			}
+		})
+	}
+}
+
+func TestPrivateDeliveryNoteWebhookIsNotSentToWhatsApp(t *testing.T) {
+	service, _, evolutionAPI, _ := disconnectedTestSetup(t)
+	evolutionAPI.disconnected = false
+	body := []byte(`{
+		"event":"message_created", "id":260009, "content":"⏳ Esta resposta ainda NÃO chegou ao cliente",
+		"message_type":"outgoing", "private":true,
+		"conversation":{"id":91,"inbox_id":7,"contact_inbox":{"source_id":"unused"}},
+		"sender":{"type":"user","name":"Atendente"}
+	}`)
+	if err := service.HandleWebhook("eef4c22f-766f-4c77-a376-52219f57adfc", nil, body); err != nil {
+		t.Fatal(err)
+	}
+	if evolutionAPI.textCalls != 0 {
+		t.Fatalf("private notes must never reach the customer, got %d sends", evolutionAPI.textCalls)
 	}
 }

@@ -89,6 +89,9 @@ type ChatwootOutboundJob struct {
 	NextAttemptAt time.Time  `json:"nextAttemptAt" gorm:"index:idx_chatwoot_outbound_due"`
 	LastError     string     `json:"lastError" gorm:"type:text"`
 	FailedAt      *time.Time `json:"failedAt,omitempty" gorm:"index:idx_chatwoot_outbound_failed"`
+	// AgentNotifiedAt records when the agents got the private note saying the
+	// reply is waiting for the WhatsApp number to reconnect.
+	AgentNotifiedAt *time.Time `json:"agentNotifiedAt,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime"`
 	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`

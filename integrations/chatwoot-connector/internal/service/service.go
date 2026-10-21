@@ -48,9 +48,54 @@ const (
 	outboundRecoveryThreshold = 2
 	outboundRecoveryWindow    = 2 * time.Minute
 	outboundRecoveryCooldown  = 10 * time.Minute
-	lidIdentityGracePeriod    = 5 * time.Second
-	lidIdentityPollInterval   = 100 * time.Millisecond
+	// A reply that cannot reach WhatsApp within this window is dropped: the
+	// customer would receive it out of context. The agents get a private note.
+	outboundDeliveryWindow = time.Hour
+	// While the WhatsApp number is disconnected the worker only reads
+	// /instance/info, which does not start the instance, so it can poll often
+	// and deliver soon after the number comes back.
+	outboundDisconnectedRetryDelay = time.Minute
+	// Short reconnects are normal; the agents are told only after this delay.
+	outboundPendingNoteDelay = 2 * time.Minute
+	lidIdentityGracePeriod   = 5 * time.Second
+	lidIdentityPollInterval  = 100 * time.Millisecond
 )
+
+// brazilTime formats the times shown to agents (Brazil has no daylight saving time).
+var brazilTime = time.FixedZone("BRT", -3*60*60)
+
+// instanceDisconnectedError means the WhatsApp number is not connected, so the
+// message was not handed to Evolution. Sending through a logged-out instance makes
+// Evolution start it again and enter the QR code flow.
+type instanceDisconnectedError struct {
+	name   string
+	number string
+	reason string
+}
+
+func (e *instanceDisconnectedError) Error() string {
+	return fmt.Sprintf("whatsapp instance %s (%s) is disconnected: %s", e.name, e.number, e.reason)
+}
+
+func (e *instanceDisconnectedError) label() string {
+	if e.number == "" {
+		return e.name
+	}
+	return fmt.Sprintf("%s (%s)", e.name, e.number)
+}
+
+func newInstanceDisconnectedError(instance *evolution.Instance) *instanceDisconnectedError {
+	number := strings.SplitN(strings.SplitN(instance.Jid, "@", 2)[0], ":", 2)[0]
+	name := strings.TrimSpace(instance.Name)
+	if name == "" {
+		name = instance.Id
+	}
+	reason := strings.TrimSpace(instance.DisconnectReason)
+	if reason == "" {
+		reason = "not connected"
+	}
+	return &instanceDisconnectedError{name: name, number: number, reason: reason}
+}
 
 type chatwootService struct {
 	repository         chatwoot_repository.ChatwootRepository
@@ -377,7 +422,7 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 			InstanceID:        instanceID,
 			ChatwootMessageID: chatwootMessageID,
 			Payload:           append([]byte(nil), body...),
-			NextAttemptAt:     now.Add(outboundInitialRetryDelay),
+			NextAttemptAt:     now.Add(outboundNextRetryDelay(err, 0)),
 			LastError:         truncateText(err.Error(), 4000),
 		}
 		if isPermanentOutboundError(err) {
@@ -397,6 +442,7 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 				chatwootMessageID,
 				err,
 			)
+			s.notifyUndelivered(cfg, payload, err, false)
 			return nil
 		}
 		s.loggerWrapper.GetLogger(instanceID).LogWarn(
@@ -421,6 +467,9 @@ func (s *chatwootService) deliverChatwootPayload(
 	instance, err := s.evolutionClient.GetInstance(context.Background(), instanceID)
 	if err != nil {
 		return err
+	}
+	if !instance.Connected {
+		return newInstanceDisconnectedError(instance)
 	}
 
 	remoteJID := ""
@@ -612,12 +661,32 @@ func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboun
 		return false
 	}
 
+	if outboundJobExpired(job, time.Now()) {
+		expiredErr := fmt.Errorf("not delivered within %s: %s", outboundDeliveryWindow, job.LastError)
+		s.failOutboundJob(job, expiredErr)
+		s.notifyUndelivered(cfg, payload, s.currentDisconnection(job.InstanceID), true)
+		return false
+	}
+
 	if err := s.deliverChatwootPayload(job.InstanceID, cfg, payload); err != nil {
 		reconnected := s.maybeRecoverOutboundSession(job.InstanceID, err)
-		s.rescheduleOutboundJob(job, err)
+		var disconnected *instanceDisconnectedError
+		if errors.As(err, &disconnected) && job.AgentNotifiedAt == nil && outboundJobAge(job, time.Now()) >= outboundPendingNoteDelay {
+			if s.notifyWaitingForReconnect(cfg, payload, disconnected, job) {
+				notifiedAt := time.Now()
+				job.AgentNotifiedAt = &notifiedAt
+			}
+		}
+		if s.rescheduleOutboundJob(job, err) {
+			s.notifyUndelivered(cfg, payload, err, false)
+		}
 		return reconnected
 	}
 	s.clearOutboundRecovery(job.InstanceID)
+	if job.AgentNotifiedAt != nil {
+		s.postPrivateNote(cfg, payload.Conversation.ID, job.InstanceID,
+			"✅ A resposta que estava aguardando o WhatsApp voltar foi entregue ao cliente.")
+	}
 
 	if err := s.repository.DeleteOutboundJob(job); err != nil {
 		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
@@ -637,15 +706,16 @@ func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboun
 	return false
 }
 
-func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) {
+// rescheduleOutboundJob reports whether the job became a terminal failure.
+func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) bool {
 	job.Attempts++
 	job.LastError = truncateText(deliveryErr.Error(), 4000)
 	if isPermanentOutboundError(deliveryErr) || job.Attempts >= outboundMaximumAttempts {
 		s.failOutboundJob(job, deliveryErr)
-		return
+		return true
 	}
 	job.FailedAt = nil
-	job.NextAttemptAt = time.Now().Add(outboundRetryDelay(job.Attempts))
+	job.NextAttemptAt = time.Now().Add(outboundNextRetryDelay(deliveryErr, job.Attempts))
 	if err := s.repository.SaveOutboundJob(job); err != nil {
 		s.loggerWrapper.GetLogger(job.InstanceID).LogError(
 			"[%s] Failed to reschedule durable Chatwoot message %s: delivery_error=%v persistence_error=%v",
@@ -654,7 +724,7 @@ func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutb
 			deliveryErr,
 			err,
 		)
-		return
+		return false
 	}
 	s.loggerWrapper.GetLogger(job.InstanceID).LogWarn(
 		"[%s] Durable Chatwoot message %s retry %d failed; next attempt at %s: %v",
@@ -664,6 +734,126 @@ func (s *chatwootService) rescheduleOutboundJob(job *chatwoot_model.ChatwootOutb
 		job.NextAttemptAt.Format(time.RFC3339),
 		deliveryErr,
 	)
+	return false
+}
+
+func outboundNextRetryDelay(deliveryErr error, attempt int) time.Duration {
+	var disconnected *instanceDisconnectedError
+	if errors.As(deliveryErr, &disconnected) {
+		return outboundDisconnectedRetryDelay
+	}
+	return outboundRetryDelay(attempt)
+}
+
+// outboundJobAge is zero when the creation time is unknown, so such a job never expires.
+func outboundJobAge(job *chatwoot_model.ChatwootOutboundJob, now time.Time) time.Duration {
+	if job.CreatedAt.IsZero() {
+		return 0
+	}
+	return now.Sub(job.CreatedAt)
+}
+
+func outboundJobExpired(job *chatwoot_model.ChatwootOutboundJob, now time.Time) bool {
+	return outboundJobAge(job, now) >= outboundDeliveryWindow
+}
+
+// currentDisconnection returns why the instance is down, or nil if it is
+// connected or its state cannot be read. It only reads /instance/info.
+func (s *chatwootService) currentDisconnection(instanceID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	instance, err := s.evolutionClient.GetInstance(ctx, instanceID)
+	if err != nil || instance.Connected {
+		return nil
+	}
+	return newInstanceDisconnectedError(instance)
+}
+
+func (s *chatwootService) notifyWaitingForReconnect(
+	cfg *chatwoot_model.ChatwootConfig,
+	payload chatwootWebhookPayload,
+	disconnected *instanceDisconnectedError,
+	job *chatwoot_model.ChatwootOutboundJob,
+) bool {
+	content := fmt.Sprintf(
+		"⏳ Esta resposta ainda NÃO chegou ao cliente: o WhatsApp %s está desconectado. "+
+			"Se ele voltar até %s, ela será enviada automaticamente; se não, será descartada.",
+		disconnected.label(),
+		job.CreatedAt.Add(outboundDeliveryWindow).In(brazilTime).Format("15:04"),
+	)
+	return s.postPrivateNote(cfg, payload.Conversation.ID, job.InstanceID, withMessageExcerpt(content, payload.Content))
+}
+
+// notifyUndelivered tells the agents that the customer did not get the reply.
+// cause may be nil when the reason is unknown.
+func (s *chatwootService) notifyUndelivered(
+	cfg *chatwoot_model.ChatwootConfig,
+	payload chatwootWebhookPayload,
+	cause error,
+	expired bool,
+) {
+	if cfg == nil {
+		return
+	}
+	var disconnected *instanceDisconnectedError
+	var content string
+	switch {
+	case errors.As(cause, &disconnected) && expired:
+		content = fmt.Sprintf(
+			"❌ Resposta NÃO entregue ao cliente: o WhatsApp %s ficou desconectado por mais de 1 hora e ela foi descartada. "+
+				"Se ainda fizer sentido, reenvie por outro número.",
+			disconnected.label(),
+		)
+	case expired:
+		content = "❌ Resposta NÃO entregue ao cliente: o envio pelo WhatsApp falhou por mais de 1 hora e ela foi descartada. " +
+			"Se ainda fizer sentido, reenvie."
+	case isPermanentOutboundError(cause):
+		content = "❌ Resposta NÃO entregue: o número do cliente não está registrado no WhatsApp."
+	default:
+		content = "❌ Resposta NÃO entregue ao cliente: o envio pelo WhatsApp falhou e foi interrompido. Se ainda fizer sentido, reenvie."
+	}
+	s.postPrivateNote(cfg, payload.Conversation.ID, cfg.InstanceID, withMessageExcerpt(content, payload.Content))
+}
+
+func withMessageExcerpt(note string, message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return note
+	}
+	runes := []rune(message)
+	if len(runes) > 120 {
+		message = string(runes[:120]) + "…"
+	}
+	return fmt.Sprintf("%s\n\nMensagem: “%s”", note, message)
+}
+
+// postPrivateNote adds a note to the conversation that only agents see.
+// Private messages are ignored by HandleWebhook, so the note is never sent to WhatsApp.
+func (s *chatwootService) postPrivateNote(
+	cfg *chatwoot_model.ChatwootConfig,
+	conversationID int,
+	instanceID string,
+	content string,
+) bool {
+	if cfg == nil || conversationID <= 0 {
+		return false
+	}
+	route := fmt.Sprintf("/api/v1/accounts/%s/conversations/%d/messages", cfg.AccountID, conversationID)
+	_, err := s.chatwootRequestJSON(http.MethodPost, cfg, route, map[string]interface{}{
+		"content":      content,
+		"message_type": "outgoing",
+		"private":      true,
+	})
+	if err != nil {
+		s.loggerWrapper.GetLogger(instanceID).LogWarn(
+			"[%s] Could not add private delivery note to Chatwoot conversation %d: %v",
+			instanceID,
+			conversationID,
+			err,
+		)
+		return false
+	}
+	return true
 }
 
 func (s *chatwootService) failOutboundJob(job *chatwoot_model.ChatwootOutboundJob, deliveryErr error) {
