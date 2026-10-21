@@ -71,6 +71,15 @@ quando o WebSocket e o handler de eventos estão ativos e impede que uma gorouti
 antiga apague a sessão nova. Falhas consecutivas de keepalive e `StreamReplaced`
 passam a recuperar somente a instância afetada.
 
+O décimo patch impede que a reconexão automática fique gerando QR code para
+uma instância deslogada. Antes de cada tentativa, o agendador confere se as
+credenciais do aparelho ainda existem em `whatsmeow_device`. Sem credenciais
+(número deslogado ou bloqueado pelo WhatsApp), ele para, grava o motivo
+`Logged out: waiting for a new QR code scan` e aguarda a leitura de um QR novo
+pelo manager. Nada é removido: a instância e as configurações de Chatwoot,
+proxy e n8n continuam. Instâncias com credenciais seguem reconectando como
+antes (quedas de rede e proxy).
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
