@@ -225,6 +225,8 @@ type evolutionWebhookPayload struct {
 	Data         map[string]interface{} `json:"data"`
 	InstanceID   string                 `json:"instanceId"`
 	InstanceName string                 `json:"instanceName"`
+	// State of a "Receipt" event: Delivered, Read or ReadSelf.
+	State string `json:"state"`
 }
 
 type evolutionMessage struct {
@@ -509,6 +511,9 @@ func (s *chatwootService) deliverChatwootPayload(
 
 	content := applyChatwootSignature(cfg, payload.Content, payload.Sender.Name)
 	if strings.TrimSpace(content) != "" && !hasAttachment {
+		// The WhatsApp ID is chosen by the connector, so the receipt link is saved
+		// before sending: the delivery receipt can arrive before Send returns.
+		s.rememberMessageReceipt(instance.Id, chatwootOutboundMessageID(instance.Id, chatwootMessageID, "text"), payload.Conversation.ID, chatwootMessageID)
 		if err := s.sendTextFromChatwoot(instance, remoteJID, content, chatwootMessageID); err != nil {
 			s.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to send Chatwoot text message %s to WhatsApp: %v", instanceID, chatwootMessageID, err)
 			sendErrors = append(sendErrors, fmt.Sprintf("text:%v", err))
@@ -525,6 +530,7 @@ func (s *chatwootService) deliverChatwootPayload(
 			caption = content
 		}
 		attachmentIndex++
+		s.rememberMessageReceipt(instance.Id, chatwootOutboundMessageID(instance.Id, chatwootMessageID, "media:"+attachment.DataURL), payload.Conversation.ID, chatwootMessageID)
 		if err := s.sendMediaFromChatwoot(
 			instance,
 			remoteJID,
@@ -606,6 +612,7 @@ func (s *chatwootService) rememberChatwootStartedConversation(
 }
 
 func (s *chatwootService) Run(ctx context.Context) {
+	go s.runReceiptCleanup(ctx)
 	s.processDueOutboundJobs(ctx)
 	ticker := time.NewTicker(outboundWorkerInterval)
 	defer ticker.Stop()
@@ -976,6 +983,9 @@ func (s *chatwootService) HandleEvolutionEvent(raw []byte) error {
 	var payload evolutionWebhookPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return fmt.Errorf("invalid evolution webhook: %w", err)
+	}
+	if payload.Event == "Receipt" {
+		return s.handleReceiptEvent(payload)
 	}
 	if payload.Event != "Message" && payload.Event != "SendMessage" {
 		return nil

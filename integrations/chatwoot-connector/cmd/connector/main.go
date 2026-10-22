@@ -60,6 +60,7 @@ func run(logger *slog.Logger) error {
 		&model.ChatwootBinding{},
 		&model.ChatwootIdentityAlias{},
 		&model.ChatwootOutboundJob{},
+		&model.ChatwootMessageReceipt{},
 		&model.ConnectorSetting{},
 		&proxymanager.TestRecord{},
 	); err != nil {

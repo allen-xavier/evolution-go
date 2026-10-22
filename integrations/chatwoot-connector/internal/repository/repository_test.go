@@ -8,6 +8,27 @@ import (
 	"gorm.io/gorm/schema"
 )
 
+func TestMessageReceiptColumnsMatchQueries(t *testing.T) {
+	parsed, err := schema.Parse(&chatwoot_model.ChatwootMessageReceipt{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("parse message receipt schema: %v", err)
+	}
+	// Columns written by hand in SaveMessageReceipt / GetMessageReceipt / UpdateMessageReceiptStatus.
+	for field, column := range map[string]string{
+		"InstanceID":        "instance_id",
+		"WhatsAppMessageID": "whats_app_message_id",
+		"ConversationID":    "conversation_id",
+		"ChatwootMessageID": "chatwoot_message_id",
+		"Status":            "status",
+		"CreatedAt":         "created_at",
+	} {
+		got := parsed.LookUpField(field)
+		if got == nil || got.DBName != column {
+			t.Fatalf("%s column = %v, want %q", field, got, column)
+		}
+	}
+}
+
 func TestIdentityAliasColumnsMatchGORMModel(t *testing.T) {
 	parsed, err := schema.Parse(
 		&chatwoot_model.ChatwootIdentityAlias{},

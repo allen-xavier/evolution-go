@@ -77,7 +77,9 @@ func consume(ctx context.Context, amqpURL string, logger *slog.Logger, handler H
 	publishConfirmations := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
 
 	deliveries := make(chan queuedDelivery, 40)
-	for _, queueName := range []string{"message", "sendmessage"} {
+	// "receipt" carries WhatsApp delivery/read receipts (Evolution publishes it when
+	// AMQP_GLOBAL_EVENTS contains READ_RECEIPT); without it the queue just stays empty.
+	for _, queueName := range []string{"message", "sendmessage", "receipt"} {
 		queue, err := channel.QueueDeclare(
 			queueName,
 			true,
@@ -116,7 +118,7 @@ func consume(ctx context.Context, amqpURL string, logger *slog.Logger, handler H
 	logger.Info(
 		"rabbitmq consumer connected",
 		"queues",
-		"message,sendmessage",
+		"message,sendmessage,receipt",
 		"workers",
 		consumerWorkers,
 		"max_attempts",

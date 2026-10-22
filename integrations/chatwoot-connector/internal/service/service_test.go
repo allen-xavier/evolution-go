@@ -80,8 +80,46 @@ type identityMemoryRepository struct {
 	deleted  []uint
 	jobs     map[uint]*model.ChatwootOutboundJob
 	nextJob  uint
+	receipts map[string]*model.ChatwootMessageReceipt
 
 	resolveAliasHook func(instanceID string, aliasJID string) (string, error)
+}
+
+func (r *identityMemoryRepository) SaveMessageReceipt(receipt *model.ChatwootMessageReceipt) error {
+	if r.receipts == nil {
+		r.receipts = map[string]*model.ChatwootMessageReceipt{}
+	}
+	key := receipt.InstanceID + "|" + receipt.WhatsAppMessageID
+	if existing, ok := r.receipts[key]; ok {
+		existing.ConversationID = receipt.ConversationID
+		existing.ChatwootMessageID = receipt.ChatwootMessageID
+		return nil
+	}
+	copy := *receipt
+	copy.ID = uint(len(r.receipts) + 1)
+	r.receipts[key] = &copy
+	return nil
+}
+
+func (r *identityMemoryRepository) GetMessageReceipt(instanceID string, whatsAppMessageID string) (*model.ChatwootMessageReceipt, error) {
+	if receipt, ok := r.receipts[instanceID+"|"+whatsAppMessageID]; ok {
+		copy := *receipt
+		return &copy, nil
+	}
+	return nil, nil
+}
+
+func (r *identityMemoryRepository) UpdateMessageReceiptStatus(id uint, status string) error {
+	for _, receipt := range r.receipts {
+		if receipt.ID == id {
+			receipt.Status = status
+		}
+	}
+	return nil
+}
+
+func (r *identityMemoryRepository) DeleteMessageReceiptsBefore(before time.Time) (int64, error) {
+	return 0, nil
 }
 
 func identityKey(instanceID string, jid string) string {

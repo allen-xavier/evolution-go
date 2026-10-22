@@ -75,6 +75,23 @@ type ChatwootIdentityAlias struct {
 	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
 }
 
+// ChatwootMessageReceipt links a WhatsApp message the connector sent (by the ID
+// the connector assigned to it) to the Chatwoot message, so WhatsApp delivery and
+// read receipts can update the message status in Chatwoot (✓, ✓✓, read).
+type ChatwootMessageReceipt struct {
+	ID uint `json:"id" gorm:"primaryKey"`
+
+	InstanceID        string `json:"instanceId" gorm:"size:191;uniqueIndex:idx_chatwoot_receipt_message"`
+	WhatsAppMessageID string `json:"whatsAppMessageId" gorm:"size:191;uniqueIndex:idx_chatwoot_receipt_message"`
+	ConversationID    int    `json:"conversationId"`
+	ChatwootMessageID int    `json:"chatwootMessageId"`
+	// Status is the last status sent to Chatwoot: sent, delivered or read.
+	Status string `json:"status" gorm:"size:20"`
+
+	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime;index:idx_chatwoot_receipt_created"`
+	UpdatedAt time.Time `json:"updatedAt" gorm:"autoUpdateTime"`
+}
+
 // ChatwootOutboundJob is a durable copy of a Chatwoot webhook that Evolution
 // could not send to WhatsApp. FailedAt keeps terminal failures for audit while
 // excluding them from the retry queue.

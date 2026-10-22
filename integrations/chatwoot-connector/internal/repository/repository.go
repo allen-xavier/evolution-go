@@ -35,6 +35,11 @@ type ChatwootRepository interface {
 
 	GetSetting(key string) (string, error)
 	SetSetting(key string, value string) error
+
+	SaveMessageReceipt(receipt *chatwoot_model.ChatwootMessageReceipt) error
+	GetMessageReceipt(instanceID string, whatsAppMessageID string) (*chatwoot_model.ChatwootMessageReceipt, error)
+	UpdateMessageReceiptStatus(id uint, status string) error
+	DeleteMessageReceiptsBefore(before time.Time) (int64, error)
 }
 
 type chatwootRepository struct {
@@ -244,6 +249,51 @@ func (r *chatwootRepository) DeleteOutboundJob(job *chatwoot_model.ChatwootOutbo
 		return nil
 	}
 	return r.db.Delete(job).Error
+}
+
+// SaveMessageReceipt records (or refreshes) the link between a WhatsApp message
+// sent by the connector and its Chatwoot message.
+func (r *chatwootRepository) SaveMessageReceipt(receipt *chatwoot_model.ChatwootMessageReceipt) error {
+	if receipt == nil || strings.TrimSpace(receipt.InstanceID) == "" || strings.TrimSpace(receipt.WhatsAppMessageID) == "" {
+		return errors.New("message receipt requires instance and WhatsApp message ID")
+	}
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "instance_id"},
+			{Name: "whats_app_message_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"conversation_id":     receipt.ConversationID,
+			"chatwoot_message_id": receipt.ChatwootMessageID,
+			"updated_at":          time.Now(),
+		}),
+	}).Create(receipt).Error
+}
+
+func (r *chatwootRepository) GetMessageReceipt(instanceID string, whatsAppMessageID string) (*chatwoot_model.ChatwootMessageReceipt, error) {
+	var receipt chatwoot_model.ChatwootMessageReceipt
+	err := r.db.
+		Where("instance_id = ? AND whats_app_message_id = ?", instanceID, whatsAppMessageID).
+		First(&receipt).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &receipt, nil
+}
+
+func (r *chatwootRepository) UpdateMessageReceiptStatus(id uint, status string) error {
+	return r.db.Model(&chatwoot_model.ChatwootMessageReceipt{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{"status": status, "updated_at": time.Now()}).Error
+}
+
+// DeleteMessageReceiptsBefore drops links too old to still receive receipts.
+func (r *chatwootRepository) DeleteMessageReceiptsBefore(before time.Time) (int64, error) {
+	result := r.db.Where("created_at < ?", before).Delete(&chatwoot_model.ChatwootMessageReceipt{})
+	return result.RowsAffected, result.Error
 }
 
 func NewChatwootRepository(db *gorm.DB) ChatwootRepository {
