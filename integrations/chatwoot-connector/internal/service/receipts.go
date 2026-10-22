@@ -93,6 +93,30 @@ func (s *chatwootService) handleReceiptEvent(payload evolutionWebhookPayload) er
 	if len(ids) == 0 {
 		return nil
 	}
+	sender, _ := mapLookup(payload.Data, "Sender", "sender").(string)
+	chat, _ := mapLookup(payload.Data, "Chat", "chat").(string)
+	// Receipts from this account's own devices (the number's phone, other linked
+	// devices) say nothing about the contact: only the contact's receipts count.
+	if fromMe, _ := mapLookup(payload.Data, "IsFromMe", "isFromMe").(bool); fromMe {
+		s.loggerWrapper.GetLogger(instanceID).LogInfo(
+			"[%s] Ignoring %s receipt from own device %s (chat %s)",
+			instanceID,
+			status,
+			sender,
+			chat,
+		)
+		return nil
+	}
+	// Device ":0" is the contact's phone; ":N" are linked devices (WhatsApp Web,
+	// Desktop, tablet), which WhatsApp itself also counts as delivered.
+	s.loggerWrapper.GetLogger(instanceID).LogInfo(
+		"[%s] WhatsApp %s receipt from %s (chat %s) for %d message(s)",
+		instanceID,
+		status,
+		sender,
+		chat,
+		len(ids),
+	)
 
 	cfg, err := s.repository.GetConfig(instanceID)
 	if err != nil {

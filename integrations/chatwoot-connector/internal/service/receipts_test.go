@@ -102,10 +102,15 @@ func TestReceiptIgnoresUnknownMessagesSelfReadAndGroups(t *testing.T) {
 
 	group := receiptEvent("Read", waID)
 	group.Data["IsGroup"] = true
+	// The number's own phone confirming the copy it got (contact in airplane mode).
+	ownDevice := receiptEvent("Delivered", waID)
+	ownDevice.Data["IsFromMe"] = true
+	ownDevice.Data["Sender"] = "5531988880986:0@s.whatsapp.net"
 	for _, event := range []evolutionWebhookPayload{
 		receiptEvent("Read", "MESSAGE-FROM-PHONE"), // not sent by the connector
 		receiptEvent("ReadSelf", waID),             // this account read the contact
 		group,
+		ownDevice,
 	} {
 		if err := service.handleReceiptEvent(event); err != nil {
 			t.Fatal(err)
