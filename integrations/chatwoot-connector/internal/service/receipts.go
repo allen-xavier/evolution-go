@@ -39,6 +39,21 @@ func receiptStatus(state string) string {
 	}
 }
 
+// receiptDevice returns the device number of a JID like "5531...:38@s.whatsapp.net"
+// or "2846...:38@lid" (no ":N" means device 0, the phone).
+func receiptDevice(jid string) int {
+	user := strings.SplitN(strings.TrimSpace(jid), "@", 2)[0]
+	parts := strings.SplitN(user, ":", 2)
+	if len(parts) < 2 {
+		return 0
+	}
+	device, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+	return device
+}
+
 func receiptMessageIDs(data map[string]interface{}) []string {
 	raw := mapLookup(data, "MessageIDs", "messageIds", "message_ids")
 	list, ok := raw.([]interface{})
@@ -108,7 +123,19 @@ func (s *chatwootService) handleReceiptEvent(payload evolutionWebhookPayload) er
 		return nil
 	}
 	// Device ":0" is the contact's phone; ":N" are linked devices (WhatsApp Web,
-	// Desktop, tablet), which WhatsApp itself also counts as delivered.
+	// Desktop, tablet, integrations). WhatsApp counts those as delivered too, but
+	// the user wants ✓✓ to mean "reached the contact's phone" (to notice when the
+	// contact is offline or has blocked the number), so delivery only counts from
+	// the phone. A read on any device is still a read.
+	if status == "delivered" && receiptDevice(sender) != 0 {
+		s.loggerWrapper.GetLogger(instanceID).LogInfo(
+			"[%s] Ignoring delivered receipt from linked device %s (chat %s): only the contact's phone counts",
+			instanceID,
+			sender,
+			chat,
+		)
+		return nil
+	}
 	s.loggerWrapper.GetLogger(instanceID).LogInfo(
 		"[%s] WhatsApp %s receipt from %s (chat %s) for %d message(s)",
 		instanceID,
