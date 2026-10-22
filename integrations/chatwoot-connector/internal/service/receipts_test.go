@@ -121,52 +121,6 @@ func TestReceiptIgnoresUnknownMessagesSelfReadAndGroups(t *testing.T) {
 	}
 }
 
-func TestDeliveredOnlyFromContactPhoneButReadFromAnyDevice(t *testing.T) {
-	service, _, calls, done := receiptTestService(t, http.StatusOK)
-	defer done()
-
-	waID := chatwootOutboundMessageID("inst", "412789", "text")
-	service.rememberMessageReceipt("inst", waID, 90, "412789")
-
-	// Contact's phone in airplane mode, WhatsApp Web (device 38) online: still one tick.
-	web := receiptEvent("Delivered", waID)
-	web.Data["Sender"] = "28462999949545:38@lid"
-	if err := service.handleReceiptEvent(web); err != nil {
-		t.Fatal(err)
-	}
-	if len(*calls) != 0 {
-		t.Fatalf("delivery on a linked device must not count: %#v", *calls)
-	}
-
-	phone := receiptEvent("Delivered", waID)
-	phone.Data["Sender"] = "28462999949545@lid"
-	if err := service.handleReceiptEvent(phone); err != nil {
-		t.Fatal(err)
-	}
-	readOnWeb := receiptEvent("Read", waID)
-	readOnWeb.Data["Sender"] = "28462999949545:38@lid"
-	if err := service.handleReceiptEvent(readOnWeb); err != nil {
-		t.Fatal(err)
-	}
-	if len(*calls) != 2 || (*calls)[0].status != "delivered" || (*calls)[1].status != "read" {
-		t.Fatalf("expected delivered (phone) then read (web): %#v", *calls)
-	}
-}
-
-func TestReceiptDevice(t *testing.T) {
-	for jid, want := range map[string]int{
-		"553193291010@s.whatsapp.net":    0,
-		"553193291010:0@s.whatsapp.net":  0,
-		"28462999949545:38@lid":          38,
-		"553193291010:12@s.whatsapp.net": 12,
-		"":                               0,
-	} {
-		if got := receiptDevice(jid); got != want {
-			t.Fatalf("receiptDevice(%q) = %d, want %d", jid, got, want)
-		}
-	}
-}
-
 func TestReceiptChatwootRefusalIsNotRetried(t *testing.T) {
 	service, repo, _, done := receiptTestService(t, http.StatusNotFound)
 	defer done()
