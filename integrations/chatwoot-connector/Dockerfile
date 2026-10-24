@@ -14,7 +14,8 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+# ffmpeg: converte vídeos que não são MP4 (ex.: .MOV do iPhone) antes de enviar ao WhatsApp.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 WORKDIR /app
 COPY --from=build /out/chatwoot-connector /app/chatwoot-connector
 

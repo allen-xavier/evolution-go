@@ -26,6 +26,8 @@ type outboundFakeEvolution struct {
 	reconnectErr   error
 	reconnectCalls int
 	disconnected   bool
+	mediaCalls     []evolution.MediaRequest
+	sendMediaErr   error
 }
 
 func (f *outboundFakeEvolution) GetInstance(context.Context, string) (*evolution.Instance, error) {
@@ -48,8 +50,9 @@ func (f *outboundFakeEvolution) SendText(context.Context, *evolution.Instance, e
 	return f.sendTextErr
 }
 
-func (*outboundFakeEvolution) SendMedia(context.Context, *evolution.Instance, evolution.MediaRequest) error {
-	return nil
+func (f *outboundFakeEvolution) SendMedia(_ context.Context, _ *evolution.Instance, request evolution.MediaRequest) error {
+	f.mediaCalls = append(f.mediaCalls, request)
+	return f.sendMediaErr
 }
 
 func (*outboundFakeEvolution) SetProxy(context.Context, string, evolution.ProxyConfig) error {

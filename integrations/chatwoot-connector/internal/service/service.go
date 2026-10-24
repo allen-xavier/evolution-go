@@ -98,10 +98,14 @@ func newInstanceDisconnectedError(instance *evolution.Instance) *instanceDisconn
 }
 
 type chatwootService struct {
-	repository         chatwoot_repository.ChatwootRepository
-	evolutionClient    evolution.API
-	lidResolver        func(instanceID string, lidJID string) (string, bool)
-	httpClient         *http.Client
+	repository      chatwoot_repository.ChatwootRepository
+	evolutionClient evolution.API
+	lidResolver     func(instanceID string, lidJID string) (string, bool)
+	httpClient      *http.Client
+	// mediaHTTPClient downloads attachments (large videos need minutes, not 60 s).
+	mediaHTTPClient *http.Client
+	// videoPreparer converts videos to MP4 for WhatsApp (nil = prepareVideoForWhatsApp).
+	videoPreparer      func(data []byte) ([]byte, bool, error)
 	skipCache          *cache.Cache
 	webhookCache       *cache.Cache
 	evolutionCache     *cache.Cache
@@ -814,6 +818,9 @@ func (s *chatwootService) notifyUndelivered(
 	case expired:
 		content = "❌ Resposta NÃO entregue ao cliente: o envio pelo WhatsApp falhou por mais de 1 hora e ela foi descartada. " +
 			"Se ainda fizer sentido, reenvie."
+	case isUnsupportedMediaError(cause):
+		content = "❌ Arquivo NÃO entregue: o WhatsApp não aceitou o formato ou o tamanho deste arquivo. " +
+			"Tente enviar em outro formato (vídeo MP4, foto JPG) ou como documento."
 	case isPermanentOutboundError(cause):
 		content = "❌ Resposta NÃO entregue: o número do cliente não está registrado no WhatsApp."
 	default:
@@ -895,7 +902,8 @@ func isPermanentOutboundError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "not registered on whatsapp") ||
-		strings.Contains(message, "is not registered")
+		strings.Contains(message, "is not registered") ||
+		isUnsupportedMediaError(err)
 }
 
 func isRecoverableSessionError(err error) bool {
@@ -2009,6 +2017,34 @@ func (s *chatwootService) sendMediaFromChatwoot(
 	if strings.TrimSpace(fileName) == "" {
 		fileName = fmt.Sprintf("chatwoot-%d", time.Now().Unix())
 	}
+	if mediaKind == "video" {
+		prepare := s.videoPreparer
+		if prepare == nil {
+			prepare = prepareVideoForWhatsApp
+		}
+		prepared, converted, convErr := prepare(fileData)
+		switch {
+		case convErr != nil:
+			// The contact still gets the file, as a document instead of an inline video.
+			s.loggerWrapper.GetLogger(instance.Id).LogWarn(
+				"[%s] Video for Chatwoot message %s could not be converted to MP4, sending as document: %v",
+				instance.Id,
+				chatwootMessageID,
+				convErr,
+			)
+			mediaKind = "document"
+		case converted:
+			s.loggerWrapper.GetLogger(instance.Id).LogInfo(
+				"[%s] Video for Chatwoot message %s converted to MP4 (%d -> %d bytes)",
+				instance.Id,
+				chatwootMessageID,
+				len(fileData),
+				len(prepared),
+			)
+			fileData = prepared
+			fileName = withExtension(fileName, ".mp4")
+		}
+	}
 
 	number, formatJID := recipientForSend(remoteJID)
 	messageID := chatwootOutboundMessageID(instance.Id, chatwootMessageID, "media:"+dataURL)
@@ -2049,7 +2085,12 @@ func (s *chatwootService) downloadAttachmentData(raw string) ([]byte, string, er
 	}
 	req.Header.Set("User-Agent", "evolution-go-chatwoot/1.0")
 
-	resp, err := s.httpClient.Do(req)
+	// Large videos need more than the 60 s used for Chatwoot API calls.
+	client := s.mediaHTTPClient
+	if client == nil {
+		client = s.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -3454,6 +3495,9 @@ func NewChatwootService(
 		lidResolver:     lidResolver,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
+		},
+		mediaHTTPClient: &http.Client{
+			Timeout: 5 * time.Minute,
 		},
 		skipCache:        cache.New(10*time.Minute, 20*time.Minute),
 		webhookCache:     cache.New(24*time.Hour, 1*time.Hour),

@@ -73,6 +73,9 @@ type Client struct {
 	baseURL      string
 	globalAPIKey string
 	httpClient   *http.Client
+	// mediaClient sends media: Evolution answers only after uploading the file to
+	// WhatsApp (through the instance proxy), which takes minutes for large videos.
+	mediaClient *http.Client
 }
 
 func NewClient(baseURL, globalAPIKey string) (*Client, error) {
@@ -88,6 +91,7 @@ func NewClient(baseURL, globalAPIKey string) (*Client, error) {
 		baseURL:      baseURL,
 		globalAPIKey: globalAPIKey,
 		httpClient:   &http.Client{Timeout: 60 * time.Second},
+		mediaClient:  &http.Client{Timeout: 5 * time.Minute},
 	}, nil
 }
 
@@ -332,7 +336,7 @@ func (c *Client) SendMedia(ctx context.Context, instance *Instance, payload Medi
 	}
 	req.Header.Set("apikey", instance.Token)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	return c.do(req)
+	return c.doWith(c.mediaClient, req)
 }
 
 func (c *Client) sendJSON(ctx context.Context, instance *Instance, endpoint string, payload interface{}) error {
@@ -353,7 +357,14 @@ func (c *Client) sendJSON(ctx context.Context, instance *Instance, endpoint stri
 }
 
 func (c *Client) do(req *http.Request) error {
-	resp, err := c.httpClient.Do(req)
+	return c.doWith(c.httpClient, req)
+}
+
+func (c *Client) doWith(client *http.Client, req *http.Request) error {
+	if client == nil {
+		client = c.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("evolution request failed: %w", err)
 	}
