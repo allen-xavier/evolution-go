@@ -1,0 +1,166 @@
+diff --git a/pkg/whatsmeow/service/media_download_retry.go b/pkg/whatsmeow/service/media_download_retry.go
+new file mode 100644
+index 0000000..75d930a
+--- /dev/null
++++ b/pkg/whatsmeow/service/media_download_retry.go
+@@ -0,0 +1,65 @@
++package whatsmeow_service
++
++import (
++	"context"
++	"errors"
++	"net"
++	"strings"
++	"time"
++
++	"go.mau.fi/whatsmeow"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++)
++
++// mediaDownloadRetryDelays are the pauses before each extra download attempt of
++// an incoming media message. whatsmeow already retries a few times within about
++// 15 seconds; these extra attempts cover longer network or proxy hiccups.
++var mediaDownloadRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second}
++
++// retryableMediaDownloadError reports whether a failed media download is worth
++// trying again: network errors are, while expired, missing or corrupted media
++// (HTTP 403/404/410, invalid hmac or hash) and cancellations are not.
++func retryableMediaDownloadError(err error) bool {
++	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		return false
++	}
++	var netErr net.Error
++	return errors.As(err, &netErr) || strings.HasPrefix(err.Error(), "stream error:")
++}
++
++// mediaDownloadRetryTarget returns the media the incoming message handler
++// downloaded, following the same order as the handler. Stickers return nil:
++// they need a conversion after the download and are not worth a retry.
++func mediaDownloadRetryTarget(
++	img *waE2E.ImageMessage,
++	audio *waE2E.AudioMessage,
++	document *waE2E.DocumentMessage,
++	video *waE2E.VideoMessage,
++	sticker *waE2E.StickerMessage,
++	associatedImg *waE2E.ImageMessage,
++	associatedAudio *waE2E.AudioMessage,
++	associatedDocument *waE2E.DocumentMessage,
++	associatedVideo *waE2E.VideoMessage,
++) whatsmeow.DownloadableMessage {
++	switch {
++	case img != nil:
++		return img
++	case audio != nil:
++		return audio
++	case document != nil:
++		return document
++	case video != nil:
++		return video
++	case sticker != nil:
++		return nil
++	case associatedImg != nil:
++		return associatedImg
++	case associatedAudio != nil:
++		return associatedAudio
++	case associatedDocument != nil:
++		return associatedDocument
++	case associatedVideo != nil:
++		return associatedVideo
++	}
++	return nil
++}
+diff --git a/pkg/whatsmeow/service/media_download_retry_test.go b/pkg/whatsmeow/service/media_download_retry_test.go
+new file mode 100644
+index 0000000..6864807
+--- /dev/null
++++ b/pkg/whatsmeow/service/media_download_retry_test.go
+@@ -0,0 +1,58 @@
++package whatsmeow_service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/url"
++	"testing"
++
++	"go.mau.fi/whatsmeow"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++)
++
++func TestRetryableMediaDownloadError(t *testing.T) {
++	proxyErr := &url.Error{Op: "Get", URL: "https://mmg.whatsapp.net/v/t62", Err: errors.New("NO_HOST_CONNECTION")}
++	cases := []struct {
++		name string
++		err  error
++		want bool
++	}{
++		{"nil", nil, false},
++		{"proxy without connection", proxyErr, true},
++		{"proxy wrapped by whatsmeow", fmt.Errorf("failed to download media from last host: %w", proxyErr), true},
++		{"http2 stream error", errors.New("stream error: stream ID 3; INTERNAL_ERROR"), true},
++		{"expired media", whatsmeow.ErrMediaDownloadFailedWith404, false},
++		{"gone media", whatsmeow.ErrMediaDownloadFailedWith410, false},
++		{"invalid hmac", whatsmeow.ErrInvalidMediaHMAC, false},
++		{"canceled", context.Canceled, false},
++		{"deadline", context.DeadlineExceeded, false},
++	}
++	for _, c := range cases {
++		if got := retryableMediaDownloadError(c.err); got != c.want {
++			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
++		}
++	}
++}
++
++func TestMediaDownloadRetryTarget(t *testing.T) {
++	doc := &waE2E.DocumentMessage{}
++	if got := mediaDownloadRetryTarget(nil, nil, doc, nil, nil, nil, nil, nil, nil); got != doc {
++		t.Errorf("document: got %v", got)
++	}
++	img := &waE2E.ImageMessage{}
++	if got := mediaDownloadRetryTarget(img, nil, doc, nil, nil, nil, nil, nil, nil); got != img {
++		t.Errorf("image comes first: got %v", got)
++	}
++	sticker := &waE2E.StickerMessage{}
++	if got := mediaDownloadRetryTarget(nil, nil, nil, nil, sticker, img, nil, nil, nil); got != nil {
++		t.Errorf("sticker: got %v, want nil", got)
++	}
++	assocDoc := &waE2E.DocumentMessage{}
++	if got := mediaDownloadRetryTarget(nil, nil, nil, nil, nil, nil, nil, assocDoc, nil); got != assocDoc {
++		t.Errorf("associated document: got %v", got)
++	}
++	if got := mediaDownloadRetryTarget(nil, nil, nil, nil, nil, nil, nil, nil, nil); got != nil {
++		t.Errorf("no media: got %v, want nil", got)
++	}
++}
+diff --git a/pkg/whatsmeow/service/whatsmeow.go b/pkg/whatsmeow/service/whatsmeow.go
+index 40f2bda..862f372 100644
+--- a/pkg/whatsmeow/service/whatsmeow.go
++++ b/pkg/whatsmeow/service/whatsmeow.go
+@@ -1725,6 +1725,26 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+ 					}
+ 				}
+ 
++				// A network failure (for example the proxy briefly unable to reach the
++				// WhatsApp media host) is retried after a pause instead of losing the file.
++				if retryTarget := mediaDownloadRetryTarget(img, audio, document, video, sticker,
++					associatedImg, associatedAudio, associatedDocument, associatedVideo); retryTarget != nil {
++					for attempt, delay := range mediaDownloadRetryDelays {
++						if !retryableMediaDownloadError(err) {
++							break
++						}
++						mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Media download failed, trying again in %v (extra attempt %d/%d) - ID: %s, Error: %v", mycli.userID, delay, attempt+1, len(mediaDownloadRetryDelays), evt.Info.ID, err)
++						select {
++						case <-downloadCtx.Done():
++						case <-time.After(delay):
++							data, err = mycli.WAClient.Download(downloadCtx, retryTarget)
++						}
++						if downloadCtx.Err() != nil {
++							break
++						}
++					}
++				}
++
+ 				downloadDuration := time.Since(downloadStart)
+ 
+ 				if err != nil {

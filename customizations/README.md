@@ -80,6 +80,17 @@ pelo manager. Nada é removido: a instância e as configurações de Chatwoot,
 proxy e n8n continuam. Instâncias com credenciais seguem reconectando como
 antes (quedas de rede e proxy).
 
+O décimo primeiro patch tenta de novo o download da mídia recebida (imagem,
+áudio, documento e vídeo) quando ele falha por erro de rede, por exemplo um
+proxy que por alguns segundos não alcança o servidor de mídia do WhatsApp
+(`NO_HOST_CONNECTION`). Depois das tentativas do próprio whatsmeow (cerca de
+15 segundos), espera 5 segundos e tenta de novo; se falhar, espera 15 segundos
+e tenta uma última vez. Antes, a mensagem seguia sem o arquivo e chegava ao
+Chatwoot só com o nome do documento. Mídia expirada ou corrompida (403/404/410,
+hmac inválido) não é repetida, e figurinhas também não. Enquanto espera, as
+próximas mensagens da mesma instância aguardam (no pior caso cerca de 1 minuto
+e meio a mais, só quando a rede falha).
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
