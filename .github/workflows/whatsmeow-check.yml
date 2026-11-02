@@ -1,0 +1,132 @@
+# Verificação quinzenal da biblioteca do WhatsApp (whatsmeow).
+# Só confere e avisa: não publica imagem nem mexe em produção.
+#   1. Os patches atuais (customizations/patches) aplicam e compilam no submódulo fixado?
+#   2. O whatsmeow oficial mais novo compila com os patches da migração (customizations/whatsmeow-upgrade)?
+#   3. Quais commits novos o whatsmeow oficial tem desde o sha de UPSTREAM.txt?
+# O resultado vira uma issue com a etiqueta "whatsmeow".
+name: Verificação quinzenal do whatsmeow
+
+on:
+  schedule:
+    - cron: "0 12 1,15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Dependências de compilação
+        run: sudo apt-get update -q && sudo apt-get install -y -q libjpeg-turbo8-dev libwebp-dev
+
+      - name: Go da versão atual (go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: 1. Patches atuais no submódulo fixado
+        id: atual
+        continue-on-error: true
+        run: |
+          set -e
+          for p in customizations/patches/*.patch; do
+            git apply --ignore-whitespace "$p" || { echo "patch $p não aplica" >> "$RUNNER_TEMP/atual.txt"; exit 1; }
+          done
+          go build ./... 2>&1 | tee -a "$RUNNER_TEMP/atual.txt"
+          go test -vet=off ./pkg/instance/service ./pkg/whatsmeow/service ./pkg/events/rabbitmq ./pkg/sendMessage/service 2>&1 | tee -a "$RUNNER_TEMP/atual.txt"
+
+      - name: Árvore limpa para a migração
+        run: |
+          git checkout -- . && git clean -fdq
+          git submodule foreach --recursive 'git checkout -- . && git clean -fdq'
+          mkdir -p "$RUNNER_TEMP/evo"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/evo"
+
+      - name: 3. Commits novos do whatsmeow oficial
+        id: commits
+        run: |
+          SHA=$(grep -E '^[0-9a-f]{40}$' customizations/whatsmeow-upgrade/UPSTREAM.txt | head -n 1)
+          git clone -q --filter=blob:none https://github.com/tulir/whatsmeow.git "$RUNNER_TEMP/wm"
+          TOPO=$(git -C "$RUNNER_TEMP/wm" rev-parse HEAD)
+          git -C "$RUNNER_TEMP/wm" log --format='- `%h` %ad %s' --date=short "$SHA..HEAD" > "$RUNNER_TEMP/commits.txt"
+          echo "base=$SHA" >> "$GITHUB_OUTPUT"
+          echo "topo=$TOPO" >> "$GITHUB_OUTPUT"
+          echo "total=$(wc -l < "$RUNNER_TEMP/commits.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Go mais novo para o whatsmeow oficial
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: 2. Whatsmeow oficial mais novo com os patches da migração
+        id: oficial
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/evo
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -e
+          rm -rf whatsmeow-lib
+          git -C "$RUNNER_TEMP/wm" archive --format=tar --prefix=whatsmeow-lib/ HEAD | tar -x
+          git init -q .
+          for p in customizations/patches/0*.patch; do
+            n=$(basename "$p")
+            case "$n" in 01[2-8]-*) continue ;; esac  # já estão no oficial
+            git apply --ignore-whitespace "$p" || { echo "patch $n não aplica" >> "$RUNNER_TEMP/oficial.txt"; exit 1; }
+          done
+          for p in customizations/whatsmeow-upgrade/1*.patch; do
+            n=$(basename "$p")
+            [ "$n" = "101-go126-deps.patch" ] && continue  # go.mod/go.sum refeitos abaixo
+            git apply --ignore-whitespace "$p" || { echo "patch $n não aplica" >> "$RUNNER_TEMP/oficial.txt"; exit 1; }
+          done
+          go mod tidy 2>&1 | tee -a "$RUNNER_TEMP/oficial.txt"
+          go build ./... 2>&1 | tee -a "$RUNNER_TEMP/oficial.txt"
+          go test -vet=off ./pkg/instance/service ./pkg/whatsmeow/service ./pkg/events/rabbitmq ./pkg/sendMessage/service 2>&1 | tee -a "$RUNNER_TEMP/oficial.txt"
+
+      - name: Abre a issue com o resultado
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATUAL: ${{ steps.atual.outcome }}
+          OFICIAL: ${{ steps.oficial.outcome }}
+          BASE: ${{ steps.commits.outputs.base }}
+          TOPO: ${{ steps.commits.outputs.topo }}
+          TOTAL: ${{ steps.commits.outputs.total }}
+        run: |
+          estado() { [ "$1" = "success" ] && echo "✅ ok" || echo "❌ falhou"; }
+          {
+            echo "Verificação automática de $(date -u +%F)."
+            echo
+            echo "| Verificação | Resultado |"
+            echo "|---|---|"
+            echo "| Patches atuais (001–018) no submódulo fixado | $(estado "$ATUAL") |"
+            echo "| whatsmeow oficial \`${TOPO:0:7}\` com os patches da migração | $(estado "$OFICIAL") |"
+            echo
+            echo "**Commits novos no whatsmeow oficial desde \`${BASE:0:7}\`: $TOTAL**"
+            echo
+            head -n 200 "$RUNNER_TEMP/commits.txt"
+            for f in atual oficial; do
+              if [ -s "$RUNNER_TEMP/$f.txt" ] && grep -qiE 'error|não aplica|FAIL' "$RUNNER_TEMP/$f.txt"; then
+                echo
+                echo "<details><summary>Saída ($f)</summary>"
+                echo
+                echo '```'
+                grep -iE -B2 -A8 'error|não aplica|FAIL' "$RUNNER_TEMP/$f.txt" | head -n 120
+                echo '```'
+                echo "</details>"
+              fi
+            done
+            echo
+            echo "Nada foi publicado. A análise de cada commit e a decisão do que trazer ficam com a tarefa quinzenal do Claude."
+          } > "$RUNNER_TEMP/issue.md"
+          gh label create whatsmeow --color 1d76db --description "Verificação do whatsmeow" 2>/dev/null || true
+          gh issue create --title "Verificação do whatsmeow $(date -u +%F)" --label whatsmeow --body-file "$RUNNER_TEMP/issue.md"
