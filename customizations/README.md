@@ -101,6 +101,11 @@ reconexão. A fila de mensagens guardadas da instância nunca andava, e a instâ
 continuava "conectada" e enviando, mas sem receber mensagem, confirmação ou
 presença. Agora o nó é confirmado e a fila anda.
 
+O décimo terceiro patch traz do whatsmeow oficial o commit `a7ea563` ("ensure
+all nodes get acked"). Mensagem que falha na leitura, decriptação que dá pânico
+e notificação com atributo inválido também passam a ser confirmadas. Assim
+nenhum outro tipo de nó trava a fila do mesmo jeito.
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
