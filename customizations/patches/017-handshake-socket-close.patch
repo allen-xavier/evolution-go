@@ -1,0 +1,13 @@
+diff --git a/whatsmeow-lib/handshake.go b/whatsmeow-lib/handshake.go
+index c345831..3c7c1bb 100644
+--- a/whatsmeow-lib/handshake.go
++++ b/whatsmeow-lib/handshake.go
+@@ -46,6 +46,8 @@ func (cli *Client) doHandshake(ctx context.Context, fs *socket.FrameSocket, ephe
+ 	var resp []byte
+ 	select {
+ 	case resp = <-fs.Frames:
++	case <-fs.Context().Done():
++		return fmt.Errorf("socket closed while waiting for handshake response: %w", fs.Context().Err())
+ 	case <-time.After(NoiseHandshakeResponseTimeout):
+ 		return fmt.Errorf("timed out waiting for handshake response")
+ 	}

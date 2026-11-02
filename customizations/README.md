@@ -106,6 +106,28 @@ all nodes get acked"). Mensagem que falha na leitura, decriptação que dá pân
 e notificação com atributo inválido também passam a ser confirmadas. Assim
 nenhum outro tipo de nó trava a fila do mesmo jeito.
 
+Os patches 014 a 018 também trazem correções do whatsmeow oficial para a
+`whatsmeow-lib` (cherry-pick sobre os patches 012/013, com os ajustes anotados):
+
+- 014: `f331563` (frame grande dividido era remontado com 3 bytes a menos e
+  derrubava a conexão), `bb54a07` (nó com tipo estranho causava panic no
+  decoder) e `415df31` (panic no tratamento de retry receipt derrubava o
+  processo inteiro, com todas as instâncias).
+- 015: `f376da2`. Um pkmsg sem estado sobrescrevia a sessão Signal e as
+  mensagens seguintes do contato chegavam "Undecryptable".
+- 016: `098bcf7`, `563bcaa` e `19c6103` (mapa LID ↔ telefone: mantém o
+  aparelho, apaga entradas velhas quando o LID ou o número muda e prefere
+  `participant_pn` como telefone).
+- 017: `d24d079`. O handshake para de esperar quando o socket fecha. Adaptado:
+  aqui `doHandshake` devolve só `error`.
+- 018: `bbe00cd`. O ack do retry receipt sai depois do reenvio. Adaptado: sem o
+  semáforo opcional de `a5594bf` e sem o wrapper de `handleUnencryptedMessage`
+  em `internals.go` (aqui o handler do 012 se chama `handleStatusNode`).
+
+Ficaram para a migração completa da biblioteca (precisam de mais adaptação):
+`4fa3462` e `28bfe53` (fila de nós por conexão), que conflitam com o ciclo de
+vida dos patches 002/007.
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e

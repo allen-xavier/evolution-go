@@ -1,0 +1,77 @@
+diff --git a/whatsmeow-lib/binary/decoder.go b/whatsmeow-lib/binary/decoder.go
+index 06868a1..5dd0f06 100644
+--- a/whatsmeow-lib/binary/decoder.go
++++ b/whatsmeow-lib/binary/decoder.go
+@@ -365,7 +365,7 @@ func (r *binaryDecoder) readNode() (*Node, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	ret.Tag = rawDesc.(string)
++	ret.Tag, _ = rawDesc.(string)
+ 	if listSize == 0 || ret.Tag == "" {
+ 		return nil, ErrInvalidNode
+ 	}
+diff --git a/whatsmeow-lib/receipt.go b/whatsmeow-lib/receipt.go
+index 9d00b45..083f9ef 100644
+--- a/whatsmeow-lib/receipt.go
++++ b/whatsmeow-lib/receipt.go
+@@ -27,12 +27,7 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
+ 		cli.Log.Warnf("Failed to parse receipt: %v", err)
+ 	} else if receipt != nil {
+ 		if receipt.Type == types.ReceiptTypeRetry {
+-			go func() {
+-				err := cli.handleRetryReceipt(ctx, receipt, node)
+-				if err != nil {
+-					cli.Log.Errorf("Failed to handle retry receipt for %s/%s from %s: %v", receipt.Chat, receipt.MessageIDs[0], receipt.Sender, err)
+-				}
+-			}()
++			go cli.tryHandleRetryReceipt(ctx, receipt, node)
+ 		}
+ 		cancelled = cli.dispatchEvent(receipt)
+ 	}
+diff --git a/whatsmeow-lib/retry.go b/whatsmeow-lib/retry.go
+index 2323e9f..d4825b5 100644
+--- a/whatsmeow-lib/retry.go
++++ b/whatsmeow-lib/retry.go
+@@ -12,6 +12,7 @@ import (
+ 	"crypto/sha256"
+ 	"encoding/binary"
+ 	"fmt"
++	"runtime/debug"
+ 	"time"
+ 
+ 	"go.mau.fi/libsignal/ecc"
+@@ -179,6 +180,19 @@ type incomingRetryKey struct {
+ 	messageID types.MessageID
+ }
+ 
++func (cli *Client) tryHandleRetryReceipt(ctx context.Context, receipt *events.Receipt, node *waBinary.Node) {
++	defer func() {
++		err := recover()
++		if err != nil {
++			cli.Log.Errorf("Retry receipt handler panicked: %v\n%s", err, debug.Stack())
++		}
++	}()
++	err := cli.handleRetryReceipt(ctx, receipt, node)
++	if err != nil {
++		cli.Log.Errorf("Failed to handle retry receipt for %s/%s from %s: %v", receipt.Chat, receipt.MessageIDs[0], receipt.Sender, err)
++	}
++}
++
+ // handleRetryReceipt handles an incoming retry receipt for an outgoing message.
+ func (cli *Client) handleRetryReceipt(ctx context.Context, receipt *events.Receipt, node *waBinary.Node) error {
+ 	retryChild, ok := node.GetOptionalChildByTag("retry")
+diff --git a/whatsmeow-lib/socket/framesocket.go b/whatsmeow-lib/socket/framesocket.go
+index ee725da..f7fc094 100644
+--- a/whatsmeow-lib/socket/framesocket.go
++++ b/whatsmeow-lib/socket/framesocket.go
+@@ -169,8 +169,8 @@ func (fs *FrameSocket) processData(msg []byte) {
+ 			if len(msg) >= FrameLengthSize {
+ 				length := (int(msg[0]) << 16) + (int(msg[1]) << 8) + int(msg[2])
+ 				fs.incomingLength = length
+-				fs.receivedLength = len(msg)
+ 				msg = msg[FrameLengthSize:]
++				fs.receivedLength = len(msg)
+ 				if len(msg) >= length {
+ 					fs.incoming = msg[:length]
+ 					msg = msg[length:]

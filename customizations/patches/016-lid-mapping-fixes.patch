@@ -1,0 +1,45 @@
+diff --git a/whatsmeow-lib/message.go b/whatsmeow-lib/message.go
+index 412e749..a81badd 100644
+--- a/whatsmeow-lib/message.go
++++ b/whatsmeow-lib/message.go
+@@ -86,9 +86,8 @@ func (cli *Client) parseMessageSource(node *waBinary.Node, requireParticipant bo
+ 		} else {
+ 			source.Sender = ag.OptionalJIDOrEmpty("participant")
+ 		}
+-		if source.AddressingMode == types.AddressingModeLID {
+-			source.SenderAlt = ag.OptionalJIDOrEmpty("participant_pn")
+-		} else {
++		source.SenderAlt = ag.OptionalJIDOrEmpty("participant_pn")
++		if source.SenderAlt.IsEmpty() && source.AddressingMode != types.AddressingModeLID {
+ 			source.SenderAlt = ag.OptionalJIDOrEmpty("participant_lid")
+ 		}
+ 		if source.Sender.User == clientID.User || source.Sender.User == clientLID.User {
+diff --git a/whatsmeow-lib/store/sqlstore/lidmap.go b/whatsmeow-lib/store/sqlstore/lidmap.go
+index e726337..06f44c8 100644
+--- a/whatsmeow-lib/store/sqlstore/lidmap.go
++++ b/whatsmeow-lib/store/sqlstore/lidmap.go
+@@ -193,7 +193,7 @@ func (s *CachedLIDMap) GetManyLIDsForPNs(ctx context.Context, pns []types.JID) (
+ 			lidDev := dev
+ 			lidDev.Server = types.HiddenUserServer
+ 			lidDev.User = lid
+-			result[dev] = lidDev.ToNonAD()
++			result[dev] = lidDev
+ 		}
+ 	})
+ 	return result, err
+@@ -258,7 +258,15 @@ func (s *CachedLIDMap) unlockedPutLIDMapping(ctx context.Context, lid, pn types.
+ 	if err != nil {
+ 		return err
+ 	}
++	oldLID := s.pnToLIDCache[pn.User]
++	oldPN := s.lidToPNCache[lid.User]
+ 	s.pnToLIDCache[pn.User] = lid.User
+ 	s.lidToPNCache[lid.User] = pn.User
++	if oldPN != "" && oldPN != pn.User && s.pnToLIDCache[oldPN] == lid.User {
++		delete(s.pnToLIDCache, oldPN)
++	}
++	if oldLID != "" && oldLID != lid.User && s.lidToPNCache[oldLID] == pn.User {
++		delete(s.lidToPNCache, oldLID)
++	}
+ 	return nil
+ }
