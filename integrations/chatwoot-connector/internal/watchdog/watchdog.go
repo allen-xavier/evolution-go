@@ -1,9 +1,16 @@
-// Package watchdog implements an end-to-end liveness probe for linked
-// WhatsApp devices. A device can keep the websocket "connected" while the
-// WhatsApp server silently stops routing messages to it (zombie session).
-// The watchdog periodically sends a self-message through Evolution and checks
-// that the echo comes back through the AMQP event flow. A probe without an
-// echo within the ack timeout raises an alert in the logs.
+// Package watchdog detects linked WhatsApp devices that keep the websocket
+// "connected" and keep sending while the WhatsApp server silently stops
+// delivering anything to them (zombie session, e.g. a stuck offline queue).
+//
+// It watches the AMQP event flow: every Message or Receipt event proves the
+// server is still delivering to the device. When an instance sends messages to
+// other chats and nothing at all comes back (no message, no delivery or read
+// receipt) for the silence window, it raises an alert in the logs and on the
+// optional webhook.
+//
+// A self-message probe cannot prove this: WhatsApp never delivers a message
+// back to the device that sent it, and the SendMessage event is produced
+// locally by Evolution, without the server.
 package watchdog
 
 import (
@@ -27,9 +34,13 @@ const (
 	// SettingKeyWebhookURL persists the alert webhook URL.
 	SettingKeyWebhookURL = "watchdog_webhook_url"
 
-	defaultProbeInterval = 15 * time.Minute
-	defaultAckTimeout    = 10 * time.Minute
+	defaultCheckInterval = 5 * time.Minute
+	defaultSilenceWindow = 15 * time.Minute
 	defaultAlertCooldown = 1 * time.Hour
+	// One contact with the phone off sends no receipt: only alert after several
+	// sends to more than one chat.
+	defaultMinSends = 3
+	defaultMinChats = 2
 )
 
 type SettingsStore interface {
@@ -41,22 +52,26 @@ type ConfigLookup interface {
 	GetConfig(instanceID string) (*chatwoot_model.ChatwootConfig, error)
 }
 
-type probeState struct {
-	sentAt       time.Time
-	lastAckAt    time.Time
-	lastAlertAt  time.Time
-	instanceName string
+type instanceState struct {
+	// Sends to other chats since the last event delivered by the server.
+	firstUnansweredAt time.Time
+	unansweredSends   int
+	unansweredChats   map[string]bool
+	lastInboundAt     time.Time
+	lastAlertAt       time.Time
+	instanceName      string
 }
 
 type InstanceStatus struct {
-	InstanceID     string     `json:"instanceId"`
-	InstanceName   string     `json:"instanceName,omitempty"`
-	Monitored      bool       `json:"monitored"`
-	PendingProbe   bool       `json:"pendingProbe"`
-	LastProbeAt    *time.Time `json:"lastProbeAt,omitempty"`
-	LastAckAt      *time.Time `json:"lastAckAt,omitempty"`
-	LastAlertAt    *time.Time `json:"lastAlertAt,omitempty"`
-	Healthy        bool       `json:"healthy"`
+	InstanceID      string     `json:"instanceId"`
+	InstanceName    string     `json:"instanceName,omitempty"`
+	Monitored       bool       `json:"monitored"`
+	PendingProbe    bool       `json:"pendingProbe"`
+	UnansweredSends int        `json:"unansweredSends"`
+	LastProbeAt     *time.Time `json:"lastProbeAt,omitempty"`
+	LastAckAt       *time.Time `json:"lastAckAt,omitempty"`
+	LastAlertAt     *time.Time `json:"lastAlertAt,omitempty"`
+	Healthy         bool       `json:"healthy"`
 }
 
 type StatusView struct {
@@ -74,14 +89,15 @@ type Watchdog struct {
 	loggerWrapper *logging.Manager
 	httpClient    *http.Client
 
-	probeInterval time.Duration
-	ackTimeout    time.Duration
+	checkInterval time.Duration
+	silenceWindow time.Duration
 	alertCooldown time.Duration
+	minSends      int
+	minChats      int
 	now           func() time.Time
 
-	mu     sync.Mutex
-	probes map[string]*probeState
-	acked  map[string]time.Time
+	mu        sync.Mutex
+	instances map[string]*instanceState
 }
 
 func New(settings SettingsStore, configs ConfigLookup, evolutionAPI evolution.API, loggerWrapper *logging.Manager) *Watchdog {
@@ -91,12 +107,13 @@ func New(settings SettingsStore, configs ConfigLookup, evolutionAPI evolution.AP
 		evolution:     evolutionAPI,
 		loggerWrapper: loggerWrapper,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
-		probeInterval: defaultProbeInterval,
-		ackTimeout:    defaultAckTimeout,
+		checkInterval: defaultCheckInterval,
+		silenceWindow: defaultSilenceWindow,
 		alertCooldown: defaultAlertCooldown,
+		minSends:      defaultMinSends,
+		minChats:      defaultMinChats,
 		now:           time.Now,
-		probes:        map[string]*probeState{},
-		acked:         map[string]time.Time{},
+		instances:     map[string]*instanceState{},
 	}
 }
 
@@ -160,32 +177,30 @@ func (w *Watchdog) Status() StatusView {
 	view := StatusView{
 		Enabled:              w.Enabled(),
 		WebhookURL:           w.WebhookURL(),
-		ProbeIntervalSeconds: int(w.probeInterval.Seconds()),
-		AckTimeoutSeconds:    int(w.ackTimeout.Seconds()),
+		ProbeIntervalSeconds: int(w.checkInterval.Seconds()),
+		AckTimeoutSeconds:    int(w.silenceWindow.Seconds()),
 		Instances:            []InstanceStatus{},
 	}
-	for instanceID, probe := range w.probes {
+	for instanceID, state := range w.instances {
 		status := InstanceStatus{
-			InstanceID:   instanceID,
-			InstanceName: probe.instanceName,
-			Monitored:    true,
+			InstanceID:      instanceID,
+			InstanceName:    state.instanceName,
+			Monitored:       true,
+			PendingProbe:    state.unansweredSends > 0,
+			UnansweredSends: state.unansweredSends,
+			Healthy:         !w.silentLocked(state),
 		}
-		if !probe.sentAt.IsZero() {
-			sentAt := probe.sentAt
-			status.LastProbeAt = &sentAt
-			status.PendingProbe = true
+		if !state.firstUnansweredAt.IsZero() {
+			at := state.firstUnansweredAt
+			status.LastProbeAt = &at
 		}
-		if !probe.lastAlertAt.IsZero() {
-			alertAt := probe.lastAlertAt
-			status.LastAlertAt = &alertAt
+		if !state.lastInboundAt.IsZero() {
+			at := state.lastInboundAt
+			status.LastAckAt = &at
 		}
-		if ackAt, ok := w.acked[instanceID]; ok {
-			ackCopy := ackAt
-			status.LastAckAt = &ackCopy
-		}
-		status.Healthy = status.LastAckAt != nil && (status.LastProbeAt == nil || !status.LastAckAt.Before(*status.LastProbeAt))
-		if status.PendingProbe && w.now().Sub(probe.sentAt) > w.ackTimeout {
-			status.Healthy = false
+		if !state.lastAlertAt.IsZero() {
+			at := state.lastAlertAt
+			status.LastAlertAt = &at
 		}
 		view.Instances = append(view.Instances, status)
 	}
@@ -202,7 +217,7 @@ func (w *Watchdog) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			w.tick(ctx)
-			timer.Reset(w.probeInterval)
+			timer.Reset(w.checkInterval)
 		}
 	}
 }
@@ -221,11 +236,9 @@ func (w *Watchdog) tick(ctx context.Context) {
 	for i := range instances {
 		instance := instances[i]
 		if !instance.Connected || strings.TrimSpace(instance.Jid) == "" {
-			w.clearPending(instance.Id)
+			w.reset(instance.Id)
 			continue
 		}
-		w.checkPending(instance)
-
 		cfg, err := w.configs.GetConfig(instance.Id)
 		if err != nil {
 			w.log(instance.Id, "watchdog failed to load chatwoot config: %v", err)
@@ -234,42 +247,48 @@ func (w *Watchdog) tick(ctx context.Context) {
 		if cfg == nil || !cfg.Enabled {
 			continue
 		}
-
-		w.sendProbe(ctx, &instance)
+		w.checkSilence(instance)
 	}
 }
 
-// checkPending raises an alert when a previously sent probe never got its echo.
-func (w *Watchdog) checkPending(instance evolution.Instance) {
+// silentLocked reports whether the instance sent enough messages without any
+// event coming back for the whole silence window. Callers hold w.mu.
+func (w *Watchdog) silentLocked(state *instanceState) bool {
+	return state.unansweredSends >= w.minSends &&
+		len(state.unansweredChats) >= w.minChats &&
+		!state.firstUnansweredAt.IsZero() &&
+		w.now().Sub(state.firstUnansweredAt) >= w.silenceWindow
+}
+
+// checkSilence raises an alert when the instance keeps sending and the server
+// delivers nothing back.
+func (w *Watchdog) checkSilence(instance evolution.Instance) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	state, ok := w.instances[instance.Id]
+	if !ok || !w.silentLocked(state) || w.now().Sub(state.lastAlertAt) < w.alertCooldown {
+		w.mu.Unlock()
+		return
+	}
+	state.lastAlertAt = w.now()
+	if instance.Name != "" {
+		state.instanceName = instance.Name
+	}
+	instanceName := state.instanceName
+	sends := state.unansweredSends
+	chats := len(state.unansweredChats)
+	silence := w.now().Sub(state.firstUnansweredAt).Round(time.Minute)
+	w.mu.Unlock()
 
-	probe, ok := w.probes[instance.Id]
-	if !ok || probe.sentAt.IsZero() {
-		return
-	}
-	age := w.now().Sub(probe.sentAt)
-	if age <= w.ackTimeout {
-		return
-	}
-
-	probe.sentAt = time.Time{}
-	if w.now().Sub(probe.lastAlertAt) < w.alertCooldown {
-		return
-	}
-	probe.lastAlertAt = w.now()
-	ageRounded := age.Round(time.Second)
-	instanceName := probe.instanceName
 	if w.loggerWrapper != nil {
 		w.loggerWrapper.GetLogger(instance.Id).LogError(
-			"watchdog ALERT: instance %q (%s) did not echo the self-message probe sent %s ago; WhatsApp may have stopped routing messages to this linked device (zombie session). Relink the instance if it persists",
-			instanceName, instance.Jid, ageRounded)
+			"watchdog ALERT: instance %q (%s) sent %d message(s) to %d chat(s) in the last %s and WhatsApp delivered nothing back (no message, no delivery or read receipt); WhatsApp may have stopped delivering to this linked device (zombie session)",
+			instanceName, instance.Jid, sends, chats, silence)
 	}
-	go w.dispatchAlertWebhook(instance, instanceName, ageRounded)
+	go w.dispatchAlertWebhook(instance, instanceName, sends, silence)
 }
 
 // dispatchAlertWebhook notifies the configured URL about a suspected zombie session.
-func (w *Watchdog) dispatchAlertWebhook(instance evolution.Instance, instanceName string, probeAge time.Duration) {
+func (w *Watchdog) dispatchAlertWebhook(instance evolution.Instance, instanceName string, sends int, silence time.Duration) {
 	webhookURL := w.WebhookURL()
 	if webhookURL == "" {
 		return
@@ -280,8 +299,9 @@ func (w *Watchdog) dispatchAlertWebhook(instance evolution.Instance, instanceNam
 		"instanceId":   instance.Id,
 		"instanceName": instanceName,
 		"jid":          instance.Jid,
-		"probeAge":     probeAge.String(),
-		"message":      "Instância não respondeu ao probe de monitoramento; o WhatsApp pode ter parado de entregar mensagens para este aparelho vinculado (sessão zumbi). Relink necessário.",
+		"probeAge":     silence.String(),
+		"sends":        sends,
+		"message":      fmt.Sprintf("O WhatsApp %s enviou %d mensagem(ns) nos últimos %s e não recebeu nada de volta (nem mensagem, nem confirmação de entrega). Ele pode ter parado de receber mensagens.", instanceName, sends, silence),
 		"timestamp":    w.now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -310,78 +330,81 @@ func (w *Watchdog) dispatchAlertWebhook(instance evolution.Instance, instanceNam
 	w.log(instance.Id, "watchdog alert webhook delivered to %s", webhookURL)
 }
 
-func (w *Watchdog) clearPending(instanceID string) {
+func (w *Watchdog) reset(instanceID string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if probe, ok := w.probes[instanceID]; ok {
-		probe.sentAt = time.Time{}
+	if state, ok := w.instances[instanceID]; ok {
+		state.firstUnansweredAt = time.Time{}
+		state.unansweredSends = 0
+		state.unansweredChats = nil
 	}
 }
 
-func (w *Watchdog) sendProbe(ctx context.Context, instance *evolution.Instance) {
-	number := selfNumber(instance.Jid)
-	if number == "" {
-		return
-	}
-
-	text := fmt.Sprintf("%s %s", chatwoot_model.WatchdogProbeMarker, w.now().UTC().Format(time.RFC3339))
-	if err := w.evolution.SendText(ctx, instance, evolution.TextRequest{Number: number, Text: text}); err != nil {
-		w.log(instance.Id, "watchdog failed to send self-message probe: %v", err)
-		return
-	}
-
-	w.mu.Lock()
-	probe, ok := w.probes[instance.Id]
+func (w *Watchdog) stateLocked(instanceID string) *instanceState {
+	state, ok := w.instances[instanceID]
 	if !ok {
-		probe = &probeState{}
-		w.probes[instance.Id] = probe
+		state = &instanceState{}
+		w.instances[instanceID] = state
 	}
-	probe.sentAt = w.now()
-	probe.instanceName = instance.Name
-	w.mu.Unlock()
-
-	w.log(instance.Id, "watchdog self-message probe sent to %s", number)
+	return state
 }
 
-// Observe inspects every AMQP event; a probe echo acknowledges the pending probe.
+// Observe inspects every AMQP event. Message and Receipt events come from the
+// WhatsApp server and clear the instance; SendMessage events to other chats
+// count as sends waiting for anything to come back.
 func (w *Watchdog) Observe(raw []byte) {
-	if !bytes.Contains(raw, []byte(chatwoot_model.WatchdogProbeMarker)) {
-		return
-	}
-
 	var payload struct {
-		Event      string `json:"event"`
-		InstanceID string `json:"instanceId"`
-		Data       struct {
+		Event        string `json:"event"`
+		InstanceID   string `json:"instanceId"`
+		InstanceName string `json:"instanceName"`
+		Data         struct {
 			Info struct {
-				IsFromMe bool `json:"IsFromMe"`
+				Chat    string `json:"Chat"`
+				Sender  string `json:"Sender"`
+				IsGroup bool   `json:"IsGroup"`
 			} `json:"Info"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return
-	}
-	if payload.InstanceID == "" || (payload.Event != "Message" && payload.Event != "SendMessage") {
-		return
-	}
-	if payload.Event != "SendMessage" && !payload.Data.Info.IsFromMe {
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.InstanceID == "" {
 		return
 	}
 
-	w.mu.Lock()
-	if probe, ok := w.probes[payload.InstanceID]; ok {
-		if !probe.sentAt.IsZero() {
-			latency := w.now().Sub(probe.sentAt)
-			w.log(payload.InstanceID, "watchdog probe acknowledged in %s", latency.Round(time.Millisecond))
+	switch payload.Event {
+	case "Message", "Receipt":
+		w.mu.Lock()
+		state := w.stateLocked(payload.InstanceID)
+		if payload.InstanceName != "" {
+			state.instanceName = payload.InstanceName
 		}
-		probe.sentAt = time.Time{}
+		state.firstUnansweredAt = time.Time{}
+		state.unansweredSends = 0
+		state.unansweredChats = nil
+		state.lastInboundAt = w.now()
+		w.mu.Unlock()
+	case "SendMessage":
+		chat := jidUser(payload.Data.Info.Chat)
+		// Old self-message probes and notes to the own number get nothing back.
+		if chat == "" || chat == jidUser(payload.Data.Info.Sender) ||
+			bytes.Contains(raw, []byte(chatwoot_model.WatchdogProbeMarker)) {
+			return
+		}
+		w.mu.Lock()
+		state := w.stateLocked(payload.InstanceID)
+		if payload.InstanceName != "" {
+			state.instanceName = payload.InstanceName
+		}
+		if state.unansweredSends == 0 {
+			state.firstUnansweredAt = w.now()
+			state.unansweredChats = map[string]bool{}
+		}
+		state.unansweredSends++
+		state.unansweredChats[chat] = true
+		w.mu.Unlock()
 	}
-	w.acked[payload.InstanceID] = w.now()
-	w.mu.Unlock()
 }
 
-// selfNumber extracts the phone number from a JID like "553121201708:20@s.whatsapp.net".
-func selfNumber(jid string) string {
+// jidUser extracts the user part of a JID like "553121201708:20@s.whatsapp.net".
+func jidUser(jid string) string {
 	jid = strings.TrimSpace(jid)
 	if at := strings.Index(jid, "@"); at > -1 {
 		jid = jid[:at]

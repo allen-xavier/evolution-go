@@ -86,8 +86,8 @@ func (f *fakeEvolution) CheckNumbers(ctx context.Context, instanceID string, num
 
 func newTestWatchdog(settings *fakeSettings, evolutionAPI *fakeEvolution) *Watchdog {
 	w := New(settings, &fakeConfigs{enabled: map[string]bool{"inst-1": true}}, evolutionAPI, nil)
-	w.probeInterval = time.Minute
-	w.ackTimeout = 30 * time.Second
+	w.checkInterval = time.Minute
+	w.silenceWindow = 15 * time.Minute
 	w.alertCooldown = time.Hour
 	return w
 }
@@ -96,92 +96,139 @@ func connectedInstance() evolution.Instance {
 	return evolution.Instance{Id: "inst-1", Name: "Michele14", Jid: "553121201708:20@s.whatsapp.net", Connected: true, Token: "token"}
 }
 
-func TestDisabledByDefaultSendsNothing(t *testing.T) {
+// sendEvent is the SendMessage event Evolution publishes after sending to chat.
+func sendEvent(chat string) []byte {
+	return []byte(fmt.Sprintf(`{"event":"SendMessage","instanceId":"inst-1","instanceName":"Michele14","data":{"Info":{"Chat":"%s@s.whatsapp.net","Sender":"553121201708:20@s.whatsapp.net","IsFromMe":true,"ID":"3EB0"},"Message":{"conversation":"oi"}}}`, chat))
+}
+
+// sendThree sends to two contacts at start, start+1m and start+2m.
+func sendThree(w *Watchdog, start time.Time) {
+	for i, chat := range []string{"5511999990001", "5511999990002", "5511999990001"} {
+		at := start.Add(time.Duration(i) * time.Minute)
+		w.now = func() time.Time { return at }
+		w.Observe(sendEvent(chat))
+	}
+}
+
+func TestDisabledSendsNothingAndNeverAlerts(t *testing.T) {
 	settings := &fakeSettings{kv: map[string]string{}}
+	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
+	w := newTestWatchdog(settings, evolutionAPI)
+
+	start := time.Now()
+	sendThree(w, start)
+	w.now = func() time.Time { return start.Add(time.Hour) }
+	w.tick(context.Background())
+
+	if len(evolutionAPI.sent) != 0 {
+		t.Fatalf("the watchdog must not send messages, got %d", len(evolutionAPI.sent))
+	}
+	if status := w.Status(); status.Instances[0].LastAlertAt != nil {
+		t.Fatal("disabled watchdog must not alert")
+	}
+}
+
+func TestEnabledNeverSendsSelfProbe(t *testing.T) {
+	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
 	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
 	w := newTestWatchdog(settings, evolutionAPI)
 
 	w.tick(context.Background())
 
 	if len(evolutionAPI.sent) != 0 {
-		t.Fatalf("expected no probes while disabled, got %d", len(evolutionAPI.sent))
+		t.Fatalf("self-message probes prove nothing and must not be sent, got %d", len(evolutionAPI.sent))
 	}
 }
 
-func TestEnabledSendsProbeToOwnNumber(t *testing.T) {
+// The bug of 2026-11-02: the SendMessage event (produced locally by Evolution)
+// counted as the echo, so an instance that received nothing for hours looked healthy.
+func TestSendingWithoutAnythingBackRaisesAlert(t *testing.T) {
 	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
 	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
 	w := newTestWatchdog(settings, evolutionAPI)
 
+	start := time.Now()
+	sendThree(w, start)
+
+	w.now = func() time.Time { return start.Add(14 * time.Minute) }
 	w.tick(context.Background())
+	if status := w.Status(); status.Instances[0].LastAlertAt != nil {
+		t.Fatal("must wait for the whole silence window")
+	}
 
-	if len(evolutionAPI.sent) != 1 {
-		t.Fatalf("expected 1 probe, got %d", len(evolutionAPI.sent))
-	}
-	probe := evolutionAPI.sent[0]
-	if probe.Number != "553121201708" {
-		t.Fatalf("expected self number 553121201708, got %q", probe.Number)
-	}
-	if !containsMarker(probe.Text) {
-		t.Fatalf("probe text must contain the watchdog marker, got %q", probe.Text)
-	}
-	if status := w.Status(); len(status.Instances) != 1 || !status.Instances[0].PendingProbe {
-		t.Fatalf("expected pending probe in status, got %+v", status.Instances)
-	}
-}
-
-func TestProbeEchoAcknowledges(t *testing.T) {
-	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
-	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
-	w := newTestWatchdog(settings, evolutionAPI)
-
+	w.now = func() time.Time { return start.Add(15 * time.Minute) }
 	w.tick(context.Background())
-	echo := fmt.Sprintf(`{"event":"SendMessage","instanceId":"inst-1","data":{"Info":{"IsFromMe":true},"Message":{"conversation":"%s 2026-08-28T00:00:00Z"}}}`, chatwoot_model.WatchdogProbeMarker)
-	w.Observe([]byte(echo))
-
 	status := w.Status()
-	if status.Instances[0].PendingProbe {
-		t.Fatal("expected probe to be acknowledged")
+	if status.Instances[0].LastAlertAt == nil {
+		t.Fatal("expected alert: 3 sends and nothing back for 15 minutes")
 	}
-	if status.Instances[0].LastAckAt == nil {
-		t.Fatal("expected LastAckAt to be recorded")
+	if status.Instances[0].Healthy || status.Instances[0].UnansweredSends != 3 {
+		t.Fatalf("expected unhealthy with 3 unanswered sends, got %+v", status.Instances[0])
+	}
+
+	// Cooldown: no second alert within the hour.
+	first := *status.Instances[0].LastAlertAt
+	w.now = func() time.Time { return start.Add(30 * time.Minute) }
+	w.tick(context.Background())
+	if got := *w.Status().Instances[0].LastAlertAt; !got.Equal(first) {
+		t.Fatal("expected a single alert within the cooldown")
 	}
 }
 
-func TestMissingEchoRaisesAlert(t *testing.T) {
+func TestReceiptOrMessageClearsTheInstance(t *testing.T) {
+	for _, event := range []string{
+		`{"event":"Receipt","instanceId":"inst-1","state":"Delivered","data":{"Chat":"5511999990001@s.whatsapp.net","MessageIDs":["3EB0"]}}`,
+		`{"event":"Message","instanceId":"inst-1","data":{"Info":{"Chat":"5511999990009@s.whatsapp.net","IsFromMe":false},"Message":{"conversation":"olá"}}}`,
+	} {
+		settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
+		evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
+		w := newTestWatchdog(settings, evolutionAPI)
+
+		start := time.Now()
+		sendThree(w, start)
+		w.now = func() time.Time { return start.Add(10 * time.Minute) }
+		w.Observe([]byte(event))
+
+		w.now = func() time.Time { return start.Add(20 * time.Minute) }
+		w.tick(context.Background())
+		status := w.Status()
+		if status.Instances[0].LastAlertAt != nil || !status.Instances[0].Healthy || status.Instances[0].LastAckAt == nil {
+			t.Fatalf("event from the server must clear the instance: %s -> %+v", event, status.Instances[0])
+		}
+	}
+}
+
+func TestSelfMessagesAndSingleChatDoNotAlert(t *testing.T) {
 	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
 	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
 	w := newTestWatchdog(settings, evolutionAPI)
 
 	start := time.Now()
 	w.now = func() time.Time { return start }
-	w.tick(context.Background())
-
-	w.now = func() time.Time { return start.Add(31 * time.Second) }
-	w.tick(context.Background())
-
-	status := w.Status()
-	if status.Instances[0].LastAlertAt == nil {
-		t.Fatal("expected alert after ack timeout")
+	// Own number (notes, old probes), a probe marker and a single contact with the phone off.
+	w.Observe(sendEvent("553121201708"))
+	w.Observe([]byte(fmt.Sprintf(`{"event":"SendMessage","instanceId":"inst-1","data":{"Info":{"Chat":"5511999990001@s.whatsapp.net","Sender":"553121201708:20@s.whatsapp.net"},"Message":{"conversation":"%s x"}}}`, chatwoot_model.WatchdogProbeMarker)))
+	for i := 0; i < 5; i++ {
+		w.Observe(sendEvent("5511999990003"))
 	}
-	if status.Instances[0].Healthy {
-		t.Fatal("expected instance to be unhealthy after missed echo")
+
+	w.now = func() time.Time { return start.Add(time.Hour) }
+	w.tick(context.Background())
+	if status := w.Status(); status.Instances[0].LastAlertAt != nil {
+		t.Fatalf("one offline contact is not a zombie session: %+v", status.Instances[0])
 	}
 }
 
 func TestDisconnectedInstanceDoesNotAlert(t *testing.T) {
 	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
 	instance := connectedInstance()
+	instance.Connected = false
 	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{instance}}
 	w := newTestWatchdog(settings, evolutionAPI)
 
 	start := time.Now()
-	w.now = func() time.Time { return start }
-	w.tick(context.Background())
-
-	instance.Connected = false
-	evolutionAPI.instances = []evolution.Instance{instance}
-	w.now = func() time.Time { return start.Add(31 * time.Second) }
+	sendThree(w, start)
+	w.now = func() time.Time { return start.Add(time.Hour) }
 	w.tick(context.Background())
 
 	if status := w.Status(); status.Instances[0].LastAlertAt != nil {
@@ -189,7 +236,7 @@ func TestDisconnectedInstanceDoesNotAlert(t *testing.T) {
 	}
 }
 
-func TestMissingEchoDeliversAlertWebhook(t *testing.T) {
+func TestAlertDeliversWebhook(t *testing.T) {
 	received := make(chan map[string]interface{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]interface{}
@@ -208,42 +255,16 @@ func TestMissingEchoDeliversAlertWebhook(t *testing.T) {
 	w := newTestWatchdog(settings, evolutionAPI)
 
 	start := time.Now()
-	w.now = func() time.Time { return start }
-	w.tick(context.Background())
-
-	w.now = func() time.Time { return start.Add(31 * time.Second) }
+	sendThree(w, start)
+	w.now = func() time.Time { return start.Add(16 * time.Minute) }
 	w.tick(context.Background())
 
 	select {
 	case payload := <-received:
-		if payload["event"] != "watchdog_alert" {
-			t.Fatalf("expected watchdog_alert event, got %v", payload["event"])
-		}
-		if payload["instanceId"] != "inst-1" {
-			t.Fatalf("expected instanceId inst-1, got %v", payload["instanceId"])
+		if payload["event"] != "watchdog_alert" || payload["instanceId"] != "inst-1" || payload["instanceName"] != "Michele14" {
+			t.Fatalf("unexpected webhook payload %v", payload)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("expected alert webhook to be delivered")
 	}
-}
-
-func TestMissingEchoWithoutWebhookOnlyLogs(t *testing.T) {
-	settings := &fakeSettings{kv: map[string]string{SettingKeyEnabled: "true"}}
-	evolutionAPI := &fakeEvolution{instances: []evolution.Instance{connectedInstance()}}
-	w := newTestWatchdog(settings, evolutionAPI)
-
-	start := time.Now()
-	w.now = func() time.Time { return start }
-	w.tick(context.Background())
-
-	w.now = func() time.Time { return start.Add(31 * time.Second) }
-	w.tick(context.Background())
-
-	if status := w.Status(); status.Instances[0].LastAlertAt == nil {
-		t.Fatal("expected alert even without webhook configured")
-	}
-}
-
-func containsMarker(text string) bool {
-	return len(text) >= len(chatwoot_model.WatchdogProbeMarker) && text[:len(chatwoot_model.WatchdogProbeMarker)] == chatwoot_model.WatchdogProbeMarker
 }
