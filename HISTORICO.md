@@ -102,3 +102,8 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
     - Hoje as instâncias saudáveis tiveram 0–1 queda em 3,5 h; as travadas, 5–6. As duas consultas foram validadas num Loki 3.5.0 local com linhas de exemplo.
 - Decisões tomadas: só alerta, nada é reconectado sozinho. Uma instância parada, que não envia nada, não é coberta pelo watchdog; quem a cobre é a regra da fila travada (o travamento derruba a conexão e gera nova prévia a cada ~50 min).
 - Pendências: publicar (aprovação do usuário). O conector vai de `0.6.9` para `0.7.0` na stack `evolution_go`. As regras sobem com `node monitoring/deploy.mjs` no ops-portainer.
+- Atualização (2026-11-02, autorizado pelo usuário: "publique os dois"):
+  - Conector `0.7.0` publicado na stack `evolution_go` pela API do Portainer, trocando só a linha da imagem do conector e mantendo `EVOLUTION_IMAGE` na v12. A tarefa roda desde 21:07:46 UTC, sem erros no log.
+  - Regras do Grafana publicadas com `node monitoring/deploy.mjs`. A primeira tentativa derrubou o Grafana (21:08–21:09 UTC, reinício em ciclo): as consultas novas tinham `Event: …` sem aspas no YAML ("mapping values are not allowed"). Corrigido com aspas simples nas duas `expr` e o arquivo validado com `yaml.safe_load` (17 regras). Publicado de novo; a tarefa roda desde 21:09:34 com "finished to provision alerting" e as regras novas consultando o Loki (200).
+  - Com as quedas de hoje, a regra "WhatsApp caindo e reconectando" pode disparar uma vez para EvolutionMichele1 e Michele14. O reinício do Grafana pode gerar "Serviço reiniciando sem parar" (monitoring_grafana).
+  - Lição: validar o YAML de provisionamento (`yaml.safe_load`) antes de todo deploy do monitoramento.
