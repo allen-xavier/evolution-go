@@ -1,0 +1,72 @@
+diff --git a/whatsmeow-lib/client.go b/whatsmeow-lib/client.go
+index 5e5c476..0db8876 100644
+--- a/whatsmeow-lib/client.go
++++ b/whatsmeow-lib/client.go
+@@ -273,6 +273,7 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
+ 	}
+ 	cli.nodeHandlers = map[string]nodeHandler{
+ 		"message":      cli.handleEncryptedMessage,
++		"status":       cli.handleStatusNode,
+ 		"appdata":      cli.handleEncryptedMessage,
+ 		"receipt":      cli.handleReceipt,
+ 		"call":         cli.handleCallEvent,
+diff --git a/whatsmeow-lib/status_node.go b/whatsmeow-lib/status_node.go
+new file mode 100644
+index 0000000..64e3fbb
+--- /dev/null
++++ b/whatsmeow-lib/status_node.go
+@@ -0,0 +1,28 @@
++// Copyright (c) 2021 Tulir Asokan
++//
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this
++// file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++package whatsmeow
++
++import (
++	"context"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++)
++
++// handleStatusNode acknowledges <status> stanzas (backport of upstream a238105, "client: handle
++// <status> nodes"). WhatsApp now delivers some status updates in a <status> node instead of
++// <message>. Without a handler the node is never acked: the server closes the stream with
++// <stream:error><ack class="status" .../></stream:error> and redelivers the same node after the
++// reconnect, so the offline queue never drains and no message, receipt or presence reaches the
++// instance again. Newsletter status updates are acked too; the Evolution does not use them.
++func (cli *Client) handleStatusNode(ctx context.Context, node *waBinary.Node) {
++	if _, err := cli.parseMessageInfo(node); err != nil {
++		cli.Log.Warnf("Failed to parse status node %s: %v", node.Attrs["id"], err)
++		cli.sendAck(ctx, node, NackParsingError)
++		return
++	}
++	cli.sendAck(ctx, node, 0)
++}
+diff --git a/whatsmeow-lib/status_node_test.go b/whatsmeow-lib/status_node_test.go
+new file mode 100644
+index 0000000..56c812c
+--- /dev/null
++++ b/whatsmeow-lib/status_node_test.go
+@@ -0,0 +1,20 @@
++package whatsmeow
++
++import (
++	"context"
++	"testing"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/store"
++	waLog "go.mau.fi/whatsmeow/util/log"
++)
++
++func TestStatusNodeHasHandler(t *testing.T) {
++	cli := NewClient(&store.Device{}, waLog.Noop)
++	handler, ok := cli.nodeHandlers["status"]
++	if !ok {
++		t.Fatal("<status> nodes have no handler, so they are never acked")
++	}
++	// Without a connection the ack fails quietly; the handler must not panic.
++	handler(context.Background(), &waBinary.Node{Tag: "status", Attrs: waBinary.Attrs{"id": "1", "type": "media"}})
++}

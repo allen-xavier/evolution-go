@@ -91,6 +91,16 @@ hmac inválido) não é repetida, e figurinhas também não. Enquanto espera, as
 próximas mensagens da mesma instância aguardam (no pior caso cerca de 1 minuto
 e meio a mais, só quando a rede falha).
 
+O décimo segundo patch é o único que mexe na biblioteca `whatsmeow-lib` (submódulo):
+traz da versão oficial do whatsmeow o tratamento dos nós `<status>` (commit
+`a238105`, julho de 2026). O WhatsApp passou a mandar algumas atualizações de
+status nesse formato; sem tratamento, a evolution-go nunca confirmava o
+recebimento, o servidor derrubava a conexão com
+`<stream:error><ack class="status" type="media"/>` e reenviava o mesmo item a cada
+reconexão. A fila de mensagens guardadas da instância nunca andava, e a instância
+continuava "conectada" e enviando, mas sem receber mensagem, confirmação ou
+presença. Agora o nó é confirmado e a fila anda.
+
 As stacks separadas e o procedimento de migração estão em
 `integrations/chatwoot-connector/docker-stack.infrastructure.swarm.yml`,
 `docker-stack.application.swarm.yml` e `STACK-MIGRATION.md`. PostgreSQL e
