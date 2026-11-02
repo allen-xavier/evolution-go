@@ -1,0 +1,80 @@
+diff --git a/pkg/sendMessage/service/check_phone_test.go b/pkg/sendMessage/service/check_phone_test.go
+new file mode 100644
+index 0000000..7aae0e8
+--- /dev/null
++++ b/pkg/sendMessage/service/check_phone_test.go
+@@ -0,0 +1,23 @@
++package send_service
++
++import (
++	"testing"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++// O whatsmeow oficial devolve o LID em JID e o telefone em PhoneNumber.
++func TestPhoneJIDForCheckPrefersPhone(t *testing.T) {
++	phone := types.NewJID("5511999990001", types.DefaultUserServer)
++	lid := types.NewJID("27535706447996", types.HiddenUserServer)
++
++	if got := phoneJIDForCheck(types.IsOnWhatsAppResponse{JID: lid, PhoneNumber: phone, IsIn: true}); got != phone {
++		t.Fatalf("expected phone JID, got %s", got)
++	}
++	if got := phoneJIDForCheck(types.IsOnWhatsAppResponse{JID: phone, IsIn: true}); got != phone {
++		t.Fatalf("phone JID must stay as is, got %s", got)
++	}
++	if got := phoneJIDForCheck(types.IsOnWhatsAppResponse{JID: lid, IsIn: true}); got != lid {
++		t.Fatalf("without phone number keep the LID, got %s", got)
++	}
++}
+diff --git a/pkg/sendMessage/service/send_service.go b/pkg/sendMessage/service/send_service.go
+index fc78964..4c39106 100644
+--- a/pkg/sendMessage/service/send_service.go
++++ b/pkg/sendMessage/service/send_service.go
+@@ -589,11 +589,21 @@ func (s *sendService) checkSingleUserExists(client *whatsmeow.Client, phone stri
+ 		return "", false, nil // Not an error, just not found
+ 	}
+ 
+-	// Return the remoteJID from WhatsApp's response
+-	remoteJID := fmt.Sprintf("%v", resp[0].JID)
++	// Return the remoteJID from WhatsApp's response. O whatsmeow oficial devolve o
++	// LID em JID e o telefone em PhoneNumber; o envio continua usando o telefone.
++	remoteJID := fmt.Sprintf("%v", phoneJIDForCheck(resp[0]))
+ 	return remoteJID, true, nil
+ }
+ 
++// phoneJIDForCheck devolve o JID de telefone de uma resposta do IsOnWhatsApp: o
++// whatsmeow oficial (6e4c341) põe o LID em JID e o telefone em PhoneNumber.
++func phoneJIDForCheck(item types.IsOnWhatsAppResponse) types.JID {
++	if item.JID.Server == types.HiddenUserServer && !item.PhoneNumber.IsEmpty() {
++		return item.PhoneNumber
++	}
++	return item.JID
++}
++
+ func findURL(text string) string {
+ 	urlRegex := `http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+`
+ 	re := regexp.MustCompile(urlRegex)
+diff --git a/pkg/user/service/user_service.go b/pkg/user/service/user_service.go
+index 2dab3cf..94434d2 100644
+--- a/pkg/user/service/user_service.go
++++ b/pkg/user/service/user_service.go
+@@ -242,9 +242,16 @@ func (u *userService) performCheckUser(client *whatsmeow.Client, numbers []strin
+ 	shouldRetry := false
+ 
+ 	for _, item := range resp {
+-		// Consultar LID Store para obter LID associado ao JID
++		// O whatsmeow oficial (6e4c341) devolve o LID em JID e o telefone em
++		// PhoneNumber: a resposta continua com o telefone em jid/remoteJid e o LID em lid.
+ 		var lidStr *string
+-		if client.Store.LIDs != nil {
++		if item.JID.Server == types.HiddenUserServer && !item.PhoneNumber.IsEmpty() {
++			lidString := fmt.Sprintf("%v", item.JID)
++			lidStr = &lidString
++			item.JID = item.PhoneNumber
++		}
++		// Consultar LID Store para obter LID associado ao JID
++		if lidStr == nil && client.Store.LIDs != nil {
+ 			if lid, err := client.Store.LIDs.GetLIDForPN(context.TODO(), item.JID); err == nil && !lid.IsEmpty() {
+ 				lidString := fmt.Sprintf("%v", lid)
+ 				lidStr = &lidString
