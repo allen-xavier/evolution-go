@@ -1,0 +1,4 @@
+# Scripts e patches das personalizações: fim de linha LF em qualquer sistema.
+customizations/**/*.sh text eol=lf
+customizations/**/*.patch text eol=lf
+.github/workflows/*.yml text eol=lf
