@@ -154,3 +154,21 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Rotina: tarefa agendada local "evolution-whatsmeow-quinzenal" (dias 1 e 15, 9h). Analisa os commits novos do tulir/whatsmeow e do Evolution oficial, testa compilação e patches numa cópia, escreve aqui e manda o resumo. Nunca publica.
 - Decisões tomadas (com o usuário): implementar tudo; Michele14 é a instância de teste da migração completa. O webhook de caixa API do Chatwoot manda todos os eventos (inclusive `message_updated`); nada a configurar, salvo se alguma caixa usar webhook da conta.
 - Pendências: publicar a evolution-go v13 e o conector 0.7.1 (aprovação); imagem e ambiente de teste da biblioteca oficial com a Michele14; verificação no GitHub Actions.
+
+### 2026-11-02 — Claude — Migração de teste para o whatsmeow oficial e verificação no GitHub
+- O que foi feito:
+  - `customizations/whatsmeow-upgrade/` (commit `67fa598`) e o script `prepare.sh`, que troca `whatsmeow-lib` pelo tulir no sha de `UPSTREAM.txt` (`54038813`) e aplica 001–011 e 101–104:
+    - `101`: Go 1.26 e `go mod tidy`.
+    - `102`: API nova de blocklist e status.
+    - `103`: pool do Postgres via `sqlstore.NewWithDB` (25/5/5 min/1 min, como o fork fazia), com testes.
+    - `104`: `/user/check` e o envio mantêm o telefone em `jid`/`remoteJid` e põem o LID em `lid`, porque o oficial (`6e4c341`) devolve `@lid` em `JID`. Teste `check_phone_test.go`.
+  - Imagem de teste `ghcr.io/allen-xavier/evolution-go:whatsmeow-oficial-teste-20261102`: Go 1.26, build e testes ok. Banco do fork v13 sobe para v16, e o fork abre o v16 (volta possível).
+  - Stack de teste `docker-stack.teste.yml` (Portainer "evolution_go_teste"): serviços `evoteste_*` com banco, RabbitMQ e volumes próprios, host `EVOLUTION_TESTE_HOST`, proxy obrigatório. Pede o DNS `evogo-teste.micheledeiansa.trade`; o painel do Cloudflare não carrega na automação, então o usuário cria o registro.
+  - `.github/workflows/whatsmeow-check.yml` (commit `b5d0c85`), nos dias 1 e 15 às 12:00 UTC e manual:
+    - confere se 001–018 aplicam, compilam e passam nos testes no submódulo fixado;
+    - compila o tulir `main` com 001–011 e 102–104 (+ `go mod tidy`, Go 1.26);
+    - lista os commits novos desde `UPSTREAM.txt` e abre uma issue com a etiqueta "whatsmeow".
+    - As Actions precisam ser ligadas no fork pelo usuário.
+  - `.gitattributes`: LF para `customizations/**/*.sh`, `*.patch` e workflows.
+- Decisões tomadas: a Michele14 é a instância de teste (usuário). Ela sai da produção antes de conectar no teste, para não haver duas sessões. O proxy exclusivo dela é configurado na tela de proxy do conector de teste (credencial com o usuário). Os riscos de comportamento do oficial (LID no envio, hash de mídia, JSON da blocklist) estão no README da migração.
+- Pendências: DNS `evogo-teste`; criar a stack de teste; desconectar a Michele14 da produção; o usuário configurar o proxy e ler o QR; apontar o webhook da caixa 12 do Chatwoot para o conector de teste; observar 2–3 dias. Publicar a v13 e o conector 0.7.1 em produção (aprovação). Ligar as Actions no fork.
