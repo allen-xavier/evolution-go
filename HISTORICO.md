@@ -107,3 +107,26 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Regras do Grafana publicadas com `node monitoring/deploy.mjs`. A primeira tentativa derrubou o Grafana (21:08–21:09 UTC, reinício em ciclo): as consultas novas tinham `Event: …` sem aspas no YAML ("mapping values are not allowed"). Corrigido com aspas simples nas duas `expr` e o arquivo validado com `yaml.safe_load` (17 regras). Publicado de novo; a tarefa roda desde 21:09:34 com "finished to provision alerting" e as regras novas consultando o Loki (200).
   - Com as quedas de hoje, a regra "WhatsApp caindo e reconectando" pode disparar uma vez para EvolutionMichele1 e Michele14. O reinício do Grafana pode gerar "Serviço reiniciando sem parar" (monitoring_grafana).
   - Lição: validar o YAML de provisionamento (`yaml.safe_load`) antes de todo deploy do monitoramento.
+
+### 2026-11-02 — Claude — Análise: atualizações do whatsmeow pendentes (nada implementado)
+- O que foi feito: análise a pedido do usuário, sem nenhuma alteração.
+  - O `whatsmeow-lib` está em `0923702` (fork EvolutionAPI, base tulir `02ec817` de 27/03/2026). O tulir/whatsmeow tem 173 commits a mais (topo `5403881`, 02/11).
+  - O fork EvolutionAPI parou em maio (`bccc4a2`). O Evolution oficial 0.7.2 (julho) trocou o fork pelo whatsmeow oficial (`b572e5b`).
+  - Mais importantes para o atendimento:
+    - `f331563`: frame dividido remontado com 3 bytes a menos, derruba a conexão.
+    - `bb54a07`: panic no decoder com nó estranho.
+    - `415df31`: panic no retry receipt derruba o processo inteiro.
+    - `bbe00cd`: ack do retry receipt depois do reenvio.
+    - `f376da2`: pkmsg sem estado sobrescrevia a sessão, e as mensagens seguintes ficavam "Undecryptable".
+    - `4fa3462`, `28bfe53`, `d24d079`: fila de nós e stream error na reconexão.
+    - `098bcf7`, `563bcaa`, `19c6103`: LID ↔ telefone.
+    - `b572e5b`: pareamento por passkey.
+  - Teste de compilação com o tulir `5403881`, numa cópia isolada já apagada:
+    - Precisa de Go 1.26 e `go mod tidy`.
+    - Só 4 ajustes triviais em `pkg/user/service/user_service.go` (`UpdateBlocklist`/`GetBlocklist` com `dhash`, `SetStatusMessage(types.SetStatusInput)`).
+    - Patches 001–011 aplicam limpos; 012/013 ficam obsoletos (já estão no upstream). Testes dos 4 pacotes ok.
+    - Perde o limite do pool do Postgres que o fork fazia dentro de `sqlstore.New`; é preciso reaplicar. O JSON da blocklist muda.
+    - Risco maior em produção: LID como padrão (`6e4c341`, `4f8f64e`) e conferência de hash de mídia.
+  - Mensagem apagada no app que continua no WhatsApp: não é da biblioteca. O conector só trata `message_created` do Chatwoot e ignora `message_updated` (mensagem apagada). A evolution-go já tem `POST /message/delete` (revoke), e o conector guarda o id do WhatsApp de cada mensagem enviada (`chatwoot_message_receipts`, 30 dias).
+- Decisões tomadas: nada antes da aprovação do usuário. Não ligar `SynchronousAck` agora: o handler baixa mídia dentro do evento, e um handler preso trava a fila sem ack.
+- Pendências: o usuário escolher o plano (patches selecionados agora e/ou migração completa com teste), a rotina de verificação a cada 15 dias e o "apagar para todos" no conector.
