@@ -155,3 +155,19 @@ func TestHandleEvolutionEventRoutesReceipts(t *testing.T) {
 		t.Fatalf("expected one read update, got %#v", *calls)
 	}
 }
+
+func TestReceiptDoesNotTouchDeletedMessage(t *testing.T) {
+	service, repo, calls, done := receiptTestService(t, http.StatusOK)
+	defer done()
+
+	waID := chatwootOutboundMessageID("inst", "950", "text")
+	service.rememberMessageReceipt("inst", waID, 85, "950")
+	saved, _ := repo.GetMessageReceipt("inst", waID)
+	_ = repo.UpdateMessageReceiptStatus(saved.ID, receiptStatusDeleted)
+	if err := service.handleReceiptEvent(receiptEvent("Read", waID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("a message deleted by the agent must keep its state, got %#v", *calls)
+	}
+}

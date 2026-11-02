@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,9 @@ type outboundFakeEvolution struct {
 	disconnected   bool
 	mediaCalls     []evolution.MediaRequest
 	sendMediaErr   error
+	numberChecks   []evolution.NumberCheck
+	deleteCalls    []evolution.DeleteMessageRequest
+	deleteErr      error
 }
 
 func (f *outboundFakeEvolution) GetInstance(context.Context, string) (*evolution.Instance, error) {
@@ -72,8 +76,13 @@ func (f *outboundFakeEvolution) ReconnectInstance(context.Context, string) error
 	return f.reconnectErr
 }
 
-func (*outboundFakeEvolution) CheckNumbers(context.Context, string, []string) ([]evolution.NumberCheck, error) {
-	return nil, nil
+func (f *outboundFakeEvolution) CheckNumbers(context.Context, string, []string) ([]evolution.NumberCheck, error) {
+	return f.numberChecks, nil
+}
+
+func (f *outboundFakeEvolution) DeleteMessageForEveryone(_ context.Context, _ *evolution.Instance, request evolution.DeleteMessageRequest) error {
+	f.deleteCalls = append(f.deleteCalls, request)
+	return f.deleteErr
 }
 
 type identityMemoryRepository struct {
@@ -100,8 +109,22 @@ func (r *identityMemoryRepository) SaveMessageReceipt(receipt *model.ChatwootMes
 	}
 	copy := *receipt
 	copy.ID = uint(len(r.receipts) + 1)
+	if copy.CreatedAt.IsZero() {
+		copy.CreatedAt = time.Now()
+	}
 	r.receipts[key] = &copy
 	return nil
+}
+
+func (r *identityMemoryRepository) ListMessageReceiptsByChatwootMessage(instanceID string, chatwootMessageID int) ([]model.ChatwootMessageReceipt, error) {
+	result := []model.ChatwootMessageReceipt{}
+	for _, receipt := range r.receipts {
+		if receipt.InstanceID == instanceID && receipt.ChatwootMessageID == chatwootMessageID {
+			result = append(result, *receipt)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
 }
 
 func (r *identityMemoryRepository) GetMessageReceipt(instanceID string, whatsAppMessageID string) (*model.ChatwootMessageReceipt, error) {
@@ -216,6 +239,16 @@ func (r *identityMemoryRepository) ListDueOutboundJobs(now time.Time, limit int)
 		}
 	}
 	return result, nil
+}
+
+func (r *identityMemoryRepository) GetPendingOutboundJob(instanceID string, chatwootMessageID string) (*model.ChatwootOutboundJob, error) {
+	for _, job := range r.jobs {
+		if job.InstanceID == instanceID && job.ChatwootMessageID == chatwootMessageID && job.FailedAt == nil {
+			copyJob := *job
+			return &copyJob, nil
+		}
+	}
+	return nil, nil
 }
 
 func (r *identityMemoryRepository) SaveOutboundJob(job *model.ChatwootOutboundJob) error {

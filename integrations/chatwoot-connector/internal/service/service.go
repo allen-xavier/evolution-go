@@ -194,13 +194,18 @@ func isChatwootNotFound(err error) bool {
 }
 
 type chatwootWebhookPayload struct {
-	Event        string      `json:"event"`
-	ID           interface{} `json:"id"`
-	Content      string      `json:"content"`
-	MessageType  string      `json:"message_type"`
-	SourceID     string      `json:"source_id"`
-	Private      bool        `json:"private"`
-	Conversation struct {
+	Event       string      `json:"event"`
+	ID          interface{} `json:"id"`
+	Content     string      `json:"content"`
+	MessageType string      `json:"message_type"`
+	SourceID    string      `json:"source_id"`
+	Private     bool        `json:"private"`
+	// content_attributes ({"deleted": true} once the agent deletes the message)
+	// and created_at are only read for message_updated; kept raw so an
+	// unexpected shape never breaks message_created.
+	ContentAttributes json.RawMessage `json:"content_attributes"`
+	CreatedAt         json.RawMessage `json:"created_at"`
+	Conversation      struct {
 		ID           int `json:"id"`
 		InboxID      int `json:"inbox_id"`
 		ContactInbox struct {
@@ -394,6 +399,9 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		return nil
 	}
 
+	if payload.Event == "message_updated" {
+		return s.handleChatwootMessageUpdated(instanceID, cfg, payload)
+	}
 	if payload.Event != "message_created" {
 		return nil
 	}
@@ -478,29 +486,9 @@ func (s *chatwootService) deliverChatwootPayload(
 		return newInstanceDisconnectedError(instance)
 	}
 
-	remoteJID := ""
-	binding, err := s.repository.GetBindingByConversationID(instanceID, payload.Conversation.ID)
+	remoteJID, startedInChatwoot, err := s.resolveChatwootRecipient(instanceID, payload)
 	if err != nil {
 		return err
-	}
-	if binding != nil {
-		remoteJID = binding.RemoteJID
-	}
-	startedInChatwoot := binding == nil
-	if remoteJID == "" {
-		remoteJID = remoteJIDFromSourceID(instanceID, payload.Conversation.ContactInbox.SourceID)
-	}
-	if isLIDRemoteJID(remoteJID) {
-		canonicalJID, resolveErr := s.repository.ResolveIdentityAlias(instanceID, remoteJID)
-		if resolveErr != nil {
-			return fmt.Errorf("resolve WhatsApp LID %s: %w", remoteJID, resolveErr)
-		}
-		if isPhoneRemoteJID(canonicalJID) {
-			remoteJID = canonicalJID
-		}
-	}
-	if remoteJID == "" {
-		return fmt.Errorf("unable to resolve remote jid for conversation %d", payload.Conversation.ID)
 	}
 	s.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Chatwoot webhook resolved recipient: remote=%s message=%s", instanceID, remoteJID, chatwootMessageID)
 
@@ -558,6 +546,40 @@ func (s *chatwootService) deliverChatwootPayload(
 	}
 
 	return nil
+}
+
+// resolveChatwootRecipient finds the WhatsApp chat of a Chatwoot conversation:
+// the binding of this number, else the contact inbox source_id; a LID is
+// replaced by the phone JID when known. startedInChatwoot reports that the
+// conversation has no binding yet (it was created in Chatwoot).
+func (s *chatwootService) resolveChatwootRecipient(
+	instanceID string,
+	payload chatwootWebhookPayload,
+) (remoteJID string, startedInChatwoot bool, err error) {
+	binding, err := s.repository.GetBindingByConversationID(instanceID, payload.Conversation.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if binding != nil {
+		remoteJID = binding.RemoteJID
+	}
+	startedInChatwoot = binding == nil
+	if remoteJID == "" {
+		remoteJID = remoteJIDFromSourceID(instanceID, payload.Conversation.ContactInbox.SourceID)
+	}
+	if isLIDRemoteJID(remoteJID) {
+		canonicalJID, resolveErr := s.repository.ResolveIdentityAlias(instanceID, remoteJID)
+		if resolveErr != nil {
+			return "", false, fmt.Errorf("resolve WhatsApp LID %s: %w", remoteJID, resolveErr)
+		}
+		if isPhoneRemoteJID(canonicalJID) {
+			remoteJID = canonicalJID
+		}
+	}
+	if remoteJID == "" {
+		return "", false, fmt.Errorf("unable to resolve remote jid for conversation %d", payload.Conversation.ID)
+	}
+	return remoteJID, startedInChatwoot, nil
 }
 
 // rememberChatwootStartedConversation records the binding of a conversation that
@@ -669,6 +691,12 @@ func (s *chatwootService) processOutboundJob(job *chatwoot_model.ChatwootOutboun
 	}
 	if cfg == nil || !cfg.Enabled {
 		s.rescheduleOutboundJob(job, errors.New("Chatwoot integration is disabled"))
+		return false
+	}
+
+	if s.deletedInChatwoot(job.InstanceID, job.ChatwootMessageID) {
+		// The agent deleted the reply while it waited for WhatsApp: never send it.
+		s.failOutboundJob(job, errors.New("message deleted in Chatwoot before delivery"))
 		return false
 	}
 

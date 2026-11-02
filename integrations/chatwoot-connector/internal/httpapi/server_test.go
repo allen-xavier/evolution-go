@@ -59,6 +59,9 @@ func (fakeEvolution) CheckNumbers(_ context.Context, instanceID string, numbers 
 	}
 	return checks, nil
 }
+func (fakeEvolution) DeleteMessageForEveryone(context.Context, *evolution.Instance, evolution.DeleteMessageRequest) error {
+	return nil
+}
 
 func TestCheckNumbersRequiresAdminKeyAndAnswersPerNumber(t *testing.T) {
 	router := New(fakeService{}, fakeEvolution{}, nil, nil, "global-key")

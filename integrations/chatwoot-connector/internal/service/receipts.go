@@ -24,7 +24,8 @@ const (
 	receiptCleanupInterval  = 6 * time.Hour
 )
 
-var receiptStatusRank = map[string]int{"sent": 1, "delivered": 2, "read": 3}
+// A message the agent deleted (revoked on WhatsApp) never gets its status changed.
+var receiptStatusRank = map[string]int{"sent": 1, "delivered": 2, "read": 3, receiptStatusDeleted: 100}
 
 // receiptStatus maps Evolution's receipt state to the Chatwoot message status.
 // ReadSelf (this account read the contact's message) does not change our ticks.

@@ -130,3 +130,27 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Mensagem apagada no app que continua no WhatsApp: não é da biblioteca. O conector só trata `message_created` do Chatwoot e ignora `message_updated` (mensagem apagada). A evolution-go já tem `POST /message/delete` (revoke), e o conector guarda o id do WhatsApp de cada mensagem enviada (`chatwoot_message_receipts`, 30 dias).
 - Decisões tomadas: nada antes da aprovação do usuário. Não ligar `SynchronousAck` agora: o handler baixa mídia dentro do evento, e um handler preso trava a fila sem ack.
 - Pendências: o usuário escolher o plano (patches selecionados agora e/ou migração completa com teste), a rotina de verificação a cada 15 dias e o "apagar para todos" no conector.
+
+### 2026-11-02 — Claude — Patches 014–018 (whatsmeow), conector 0.7.1 (apagar para todos) e rotina quinzenal
+- O que foi feito:
+  - Patches `014`–`018`: cherry-pick do whatsmeow oficial sobre 012/013, num clone descartável. Detalhes e adaptações no `customizations/README.md`:
+    - 014: `f331563`, `bb54a07` e `415df31`.
+    - 015: `f376da2`.
+    - 016: `098bcf7`, `563bcaa` e `19c6103`.
+    - 017: `d24d079`, adaptado porque `doHandshake` devolve só `error`.
+    - 018: `bbe00cd`, sem o semáforo de `a5594bf` e sem o wrapper `HandleUnencryptedMessage`.
+    - `4fa3462`/`28bfe53` ficaram para a migração completa, porque conflitam com 002/007.
+    - Patches 001–018 aplicados na árvore, `go build ./...` e testes ok; depois revertidos em ordem inversa.
+    - Imagem `ghcr.io/allen-xavier/evolution-go:proxy-safety-v13-20261102`. Commit `57b7b12`.
+  - Conector `0.7.1` (`internal/service/deletes.go`): apagar mensagem no Chatwoot (`message_updated` com `content_attributes.deleted`, outgoing, não privada) vira "apagar para todos" no WhatsApp.
+    - Chama `POST /message/delete` com `{chat, messageId}` e o token da instância, uma vez por parte: os vínculos de `chatwoot_message_receipts` e o `source_id` `wa-out:`.
+    - O chat é resolvido como no envio, inclusive o 9º dígito via `CheckNumbers`.
+    - Prazo de 48 h. Fora do prazo, sem vínculo, WhatsApp recusando ou instância desconectada: nota privada "⚠️ Mensagem apagada só no Chatwoot: ela continua no WhatsApp do cliente (motivo)."
+    - Uma vez só: cache de 7 dias e status `deleted` no vínculo.
+    - Resposta ainda na fila é cancelada.
+    - Mensagem apagada não recebe mais tique de entregue/lida.
+    - 12 testes novos; `go vet` e `go test ./...` ok.
+    - Imagem `ghcr.io/allen-xavier/evolution-go-chatwoot-connector:0.7.1`.
+  - Rotina: tarefa agendada local "evolution-whatsmeow-quinzenal" (dias 1 e 15, 9h). Analisa os commits novos do tulir/whatsmeow e do Evolution oficial, testa compilação e patches numa cópia, escreve aqui e manda o resumo. Nunca publica.
+- Decisões tomadas (com o usuário): implementar tudo; Michele14 é a instância de teste da migração completa. O webhook de caixa API do Chatwoot manda todos os eventos (inclusive `message_updated`); nada a configurar, salvo se alguma caixa usar webhook da conta.
+- Pendências: publicar a evolution-go v13 e o conector 0.7.1 (aprovação); imagem e ambiente de teste da biblioteca oficial com a Michele14; verificação no GitHub Actions.

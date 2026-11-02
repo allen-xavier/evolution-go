@@ -30,6 +30,7 @@ type ChatwootRepository interface {
 
 	EnqueueOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
 	ListDueOutboundJobs(now time.Time, limit int) ([]chatwoot_model.ChatwootOutboundJob, error)
+	GetPendingOutboundJob(instanceID string, chatwootMessageID string) (*chatwoot_model.ChatwootOutboundJob, error)
 	SaveOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
 	DeleteOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error
 
@@ -38,6 +39,7 @@ type ChatwootRepository interface {
 
 	SaveMessageReceipt(receipt *chatwoot_model.ChatwootMessageReceipt) error
 	GetMessageReceipt(instanceID string, whatsAppMessageID string) (*chatwoot_model.ChatwootMessageReceipt, error)
+	ListMessageReceiptsByChatwootMessage(instanceID string, chatwootMessageID int) ([]chatwoot_model.ChatwootMessageReceipt, error)
 	UpdateMessageReceiptStatus(id uint, status string) error
 	DeleteMessageReceiptsBefore(before time.Time) (int64, error)
 }
@@ -237,6 +239,21 @@ func (r *chatwootRepository) ListDueOutboundJobs(now time.Time, limit int) ([]ch
 	return jobs, err
 }
 
+// GetPendingOutboundJob returns the reply still waiting for WhatsApp, if any.
+func (r *chatwootRepository) GetPendingOutboundJob(instanceID string, chatwootMessageID string) (*chatwoot_model.ChatwootOutboundJob, error) {
+	var job chatwoot_model.ChatwootOutboundJob
+	err := r.db.
+		Where("instance_id = ? AND chatwoot_message_id = ? AND failed_at IS NULL", instanceID, chatwootMessageID).
+		First(&job).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (r *chatwootRepository) SaveOutboundJob(job *chatwoot_model.ChatwootOutboundJob) error {
 	if job == nil {
 		return errors.New("outbound job is required")
@@ -282,6 +299,17 @@ func (r *chatwootRepository) GetMessageReceipt(instanceID string, whatsAppMessag
 		return nil, err
 	}
 	return &receipt, nil
+}
+
+// ListMessageReceiptsByChatwootMessage returns every WhatsApp message sent for a
+// Chatwoot message (text and each attachment are separate WhatsApp messages).
+func (r *chatwootRepository) ListMessageReceiptsByChatwootMessage(instanceID string, chatwootMessageID int) ([]chatwoot_model.ChatwootMessageReceipt, error) {
+	var receipts []chatwoot_model.ChatwootMessageReceipt
+	err := r.db.
+		Where("instance_id = ? AND chatwoot_message_id = ?", instanceID, chatwootMessageID).
+		Order("id").
+		Find(&receipts).Error
+	return receipts, err
 }
 
 func (r *chatwootRepository) UpdateMessageReceiptStatus(id uint, status string) error {

@@ -76,6 +76,9 @@ func (*fakeEvolution) ReconnectInstance(context.Context, string) error { return 
 func (*fakeEvolution) CheckNumbers(context.Context, string, []string) ([]evolution.NumberCheck, error) {
 	return nil, nil
 }
+func (*fakeEvolution) DeleteMessageForEveryone(context.Context, *evolution.Instance, evolution.DeleteMessageRequest) error {
+	return nil
+}
 
 type monitorRepository struct {
 	configs []InstanceProxy

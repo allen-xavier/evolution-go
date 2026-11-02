@@ -84,8 +84,9 @@ type ChatwootMessageReceipt struct {
 	InstanceID        string `json:"instanceId" gorm:"size:191;uniqueIndex:idx_chatwoot_receipt_message"`
 	WhatsAppMessageID string `json:"whatsAppMessageId" gorm:"size:191;uniqueIndex:idx_chatwoot_receipt_message"`
 	ConversationID    int    `json:"conversationId"`
-	ChatwootMessageID int    `json:"chatwootMessageId"`
-	// Status is the last status sent to Chatwoot: sent, delivered or read.
+	ChatwootMessageID int    `json:"chatwootMessageId" gorm:"index:idx_chatwoot_receipt_chatwoot_message"`
+	// Status is the last status sent to Chatwoot: sent, delivered or read; or
+	// deleted once the agent deleted the message and it was revoked on WhatsApp.
 	Status string `json:"status" gorm:"size:20"`
 
 	CreatedAt time.Time `json:"createdAt" gorm:"autoCreateTime;index:idx_chatwoot_receipt_created"`

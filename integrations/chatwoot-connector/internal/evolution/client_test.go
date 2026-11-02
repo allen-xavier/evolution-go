@@ -280,3 +280,34 @@ func TestSendMediaUsesMultipartContract(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDeleteMessageForEveryoneUsesInstanceToken(t *testing.T) {
+	var method, path, apiKey string
+	var body map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, apiKey = r.Method, r.URL.Path, r.Header.Get("apikey")
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		_, _ = io.WriteString(w, `{"message":"success","data":{"messageId":"X","timestamp":""}}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "global-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.DeleteMessageForEveryone(context.Background(), &Instance{Id: "instance-1", Token: "instance-token"}, DeleteMessageRequest{
+		Chat:      "553199990986@s.whatsapp.net",
+		MessageID: "3EB0ABC",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/message/delete" || apiKey != "instance-token" {
+		t.Fatalf("unexpected request: method=%s path=%s apiKey=%s", method, path, apiKey)
+	}
+	if body["chat"] != "553199990986@s.whatsapp.net" || body["messageId"] != "3EB0ABC" || len(body) != 2 {
+		t.Fatalf("unexpected body: %#v", body)
+	}
+}

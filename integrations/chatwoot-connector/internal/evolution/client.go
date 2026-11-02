@@ -40,6 +40,14 @@ type MediaRequest struct {
 	Data      []byte
 }
 
+// DeleteMessageRequest is the body of Evolution's POST /message/delete ("delete
+// for everyone"): chat is the full JID of the conversation, messageId the
+// WhatsApp ID of a message this number sent.
+type DeleteMessageRequest struct {
+	Chat      string `json:"chat"`
+	MessageID string `json:"messageId"`
+}
+
 type ProxyConfig struct {
 	Protocol string `json:"protocol"`
 	Host     string `json:"host"`
@@ -67,6 +75,7 @@ type API interface {
 	DisconnectInstance(ctx context.Context, instanceID string) error
 	ReconnectInstance(ctx context.Context, instanceID string) error
 	CheckNumbers(ctx context.Context, instanceID string, numbers []string) ([]NumberCheck, error)
+	DeleteMessageForEveryone(ctx context.Context, instance *Instance, request DeleteMessageRequest) error
 }
 
 type Client struct {
@@ -159,6 +168,12 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 
 func (c *Client) SendText(ctx context.Context, instance *Instance, payload TextRequest) error {
 	return c.sendJSON(ctx, instance, "/send/text", payload)
+}
+
+// DeleteMessageForEveryone revokes a message this number sent (WhatsApp's
+// "delete for everyone"), authenticated with the instance token.
+func (c *Client) DeleteMessageForEveryone(ctx context.Context, instance *Instance, request DeleteMessageRequest) error {
+	return c.sendJSON(ctx, instance, "/message/delete", request)
 }
 
 func (c *Client) SetProxy(ctx context.Context, instanceID string, config ProxyConfig) error {
