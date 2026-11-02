@@ -1,0 +1,163 @@
+# Stack de TESTE da migração para o whatsmeow oficial (Portainer: stack "evolution_go_teste").
+# Tudo separado da produção: banco, RabbitMQ, volumes, nomes de serviço e rotas próprios.
+# Só a instância de teste (Michele14) roda aqui; ela precisa ser desconectada da produção antes,
+# para as duas não disputarem a mesma sessão. Proxy obrigatório, igual à produção.
+# Variáveis (definidas no Portainer, nunca no git): EVOLUTION_TESTE_IMAGE, CONNECTOR_TESTE_IMAGE,
+# EVOLUTION_TESTE_HOST, GLOBAL_API_KEY, CONNECTOR_API_KEY, POSTGRES_PASSWORD, RABBITMQ_USER,
+# RABBITMQ_PASSWORD, PROXY_HOST, PROXY_PORT, PROXY_USERNAME, PROXY_PASSWORD.
+version: "3.8"
+
+services:
+  evoteste_go:
+    image: "${EVOLUTION_TESTE_IMAGE}"
+    hostname: evoteste_go
+    networks:
+      - minha_rede
+    environment:
+      SERVER_PORT: "4000"
+      CLIENT_NAME: "Google Chrome"
+      OS_NAME: "macOS"
+      GLOBAL_API_KEY: "${GLOBAL_API_KEY}"
+      POSTGRES_AUTH_DB: "postgresql://postgres:${POSTGRES_PASSWORD}@evoteste_postgres:5432/evolution_go?sslmode=disable"
+      POSTGRES_USERS_DB: "postgresql://postgres:${POSTGRES_PASSWORD}@evoteste_postgres:5432/evolution_go?sslmode=disable"
+      DATABASE_SAVE_MESSAGES: "true"
+      WADEBUG: "INFO"
+      LOGTYPE: "console"
+      LOG_DIRECTORY: "/app/logs"
+      LOG_MAX_SIZE: "100"
+      LOG_MAX_BACKUPS: "5"
+      LOG_MAX_AGE: "30"
+      LOG_COMPRESS: "true"
+      CONNECT_ON_STARTUP: "true"
+      WEBHOOKFILES: "true"
+      AMQP_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@evoteste_rabbitmq:5672/"
+      AMQP_GLOBAL_ENABLED: "true"
+      AMQP_GLOBAL_EVENTS: "MESSAGE,SEND_MESSAGE,READ_RECEIPT"
+      NATS_URL: ""
+      NATS_GLOBAL_ENABLED: "false"
+      EVENT_IGNORE_GROUP: "false"
+      EVENT_IGNORE_STATUS: "true"
+      MINIO_ENABLED: "false"
+      PROXY_HOST: "${PROXY_HOST}"
+      PROXY_PORT: "${PROXY_PORT}"
+      PROXY_USERNAME: "${PROXY_USERNAME}"
+      PROXY_PASSWORD: "${PROXY_PASSWORD}"
+      PROXY_REQUIRED: "true"
+    volumes:
+      - evoteste_instances:/app/dbdata
+      - evoteste_logs:/app/logs
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.evoteste-go.rule=Host(`${EVOLUTION_TESTE_HOST}`)
+        - traefik.http.routers.evoteste-go.entrypoints=websecure
+        - traefik.http.routers.evoteste-go.priority=1
+        - traefik.http.routers.evoteste-go.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evoteste-go.service=evoteste-go
+        - traefik.http.services.evoteste-go.loadbalancer.server.port=4000
+        - traefik.http.services.evoteste-go.loadbalancer.passHostHeader=true
+
+  evoteste_connector:
+    image: "${CONNECTOR_TESTE_IMAGE}"
+    hostname: evoteste_connector
+    networks:
+      - minha_rede
+    environment:
+      PORT: "4100"
+      CONNECTOR_API_KEY: "${CONNECTOR_API_KEY}"
+      CONNECTOR_DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@evoteste_postgres:5432/evolution_go?sslmode=disable"
+      EVOLUTION_API_URL: "http://evoteste_go:4000"
+      EVOLUTION_API_KEY: "${GLOBAL_API_KEY}"
+      AMQP_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@evoteste_rabbitmq:5672/"
+      CONNECTOR_PROXY_REQUIRED: "true"
+      PROXY_MONITOR_INTERVAL_SECONDS: "60"
+      PROXY_COLLISION_ACTION: "alert"
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.evoteste-connector.rule=Host(`${EVOLUTION_TESTE_HOST}`) && PathPrefix(`/chatwoot`)
+        - traefik.http.routers.evoteste-connector.entrypoints=websecure
+        - traefik.http.routers.evoteste-connector.priority=100
+        - traefik.http.routers.evoteste-connector.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evoteste-connector.service=evoteste-connector
+        - traefik.http.services.evoteste-connector.loadbalancer.server.port=4100
+
+  evoteste_postgres:
+    image: postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    hostname: evoteste_postgres
+    networks:
+      - minha_rede
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "evolution_go"
+    volumes:
+      - evoteste_postgres_data:/var/lib/postgresql/data
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  evoteste_rabbitmq:
+    image: rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc
+    hostname: evoteste_rabbitmq
+    networks:
+      - minha_rede
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD}"
+    volumes:
+      - evoteste_rabbitmq_data:/var/lib/rabbitmq
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+volumes:
+  evoteste_instances:
+  evoteste_logs:
+  evoteste_postgres_data:
+  evoteste_rabbitmq_data:
+
+networks:
+  minha_rede:
+    external: true
+    name: minha_rede
