@@ -191,3 +191,8 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Depois: configurar o Chatwoot no conector de teste e apontar o webhook da caixa 12.
   - Ver o resultado do run 41614564864.
   - Desligar ou consertar os workflows antigos de imagem.
+
+### 2026-11-03 — Claude — Teste do whatsmeow oficial com número novo (não a Michele14)
+- O que foi feito: licença do ambiente de teste ativada pelo usuário (`/license/status` = active).
+- Decisões tomadas: o usuário prefere não mexer na Michele14, que já tem Chatwoot, proxy e VPN configurados. O teste será com um número novo, numa caixa nova do Chatwoot ligada ao conector de teste; a produção não muda. No teste existe só o proxy global (PROXY_* copiados da stack 17). Os proxies por número da produção não foram copiados, e não devem ser, porque cada número tem IP próprio. O número novo precisa de um proxy exclusivo, cadastrado pelo usuário na tela de proxy do teste.
+- Pendências: o usuário providenciar o número e o proxy dele. Depois disso: criar a instância no teste, a caixa no Chatwoot e a config do conector; o usuário lê o QR.
