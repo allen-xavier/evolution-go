@@ -215,3 +215,14 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - 08:36:05: a mensagem decifrada chegou com o telefone, e o contato foi corrigido depois. O lembrete de cliente sem resposta não disparou porque a conversa não tinha agente.
 - Decisões tomadas: a causa é que o conector nasce com `lidResolver = nil`, então não consulta `whatsmeow_lid_map` (mesmo banco) quando o evento vem só com LID. O robô também não tolera telefone nulo.
 - Pendências: aprovação do usuário para ligar o `lidResolver` no conector (consulta a `whatsmeow_lid_map`), para fazer o robô tolerar telefone nulo e para responder ao cliente.
+
+### 2026-11-03 — Claude — Conector 0.7.2: contato nunca nasce sem telefone (LID)
+- O que foi feito:
+  - `repository.NewWhatsmeowLIDResolver(db)` (commit `38ceaf4`): consulta `SELECT pn FROM whatsmeow_lid_map WHERE lid = ?` no mesmo banco da Evolution e passa a ser o `lidResolver` do serviço (antes `nil`).
+  - É usado em `resolveEvolutionRemoteJID` e no período de carência do LID. Testes do formato do LID e do telefone.
+  - Imagem `evolution-go-chatwoot-connector:0.7.2`.
+- Decisões tomadas:
+  - O whatsmeow oficial (tulir `main`) também não preenche `SenderAlt` em `ParseWebMessage`/`handlePlaceholderResendResponse`, então a migração não resolveria; a correção fica no conector, que serve às duas versões.
+  - Robô do n8n sem mudança: com o telefone garantido no conector, a causa some. O aviso ao administrador (backend XavierChat) cobre o que sobrar.
+  - Não atribuir a conversa a agente: o robô atende primeiro (decisão do usuário).
+- Pendências: publicar a 0.7.2 (aprovação). A leitura de `whatsmeow_lid_map` na produção para confirmar o caso de 03/11 foi bloqueada pelo controle de leitura de produção (não feita).
