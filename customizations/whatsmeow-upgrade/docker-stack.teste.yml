@@ -147,9 +147,10 @@ services:
         condition: on-failure
         delay: 5s
       resources:
+        # Com 0.25 o Erlang fica estrangulado e não chega a abrir a porta 5672.
         limits:
-          cpus: "0.25"
-          memory: 512M
+          cpus: "0.50"
+          memory: 1024M
 
 volumes:
   evoteste_instances:
