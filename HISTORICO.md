@@ -241,3 +241,19 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - A causa foi corrigida no conector 0.7.2 (evolution-go).
 - Pendências: publicar a API (aprovação). Não muda o app (sem build iOS).
 - Atualização (2026-11-03, autorizado pelo usuário: "pode publicar"): conector `0.7.2` publicado na stack 17 (linha da imagem). Rodando desde 10:45:22 UTC, consumidor do RabbitMQ conectado, sem erros.
+
+### 2026-11-03 — Claude — Teste do whatsmeow oficial: TesteOficial conectado e funcionando
+- O que foi feito: conferência pelos logs da stack `evolution_go_teste` depois que o usuário conectou o número novo (instância TesteOficial, caixa 20 do Chatwoot):
+  - pareamento às 10:24 UTC (`PairSuccess`, `Connected`, `HistorySync`);
+  - proxy exclusivo (session id novo) cadastrado às 10:32, em modo fail-closed;
+  - mensagem recebida e enviada ao Chatwoot;
+  - resposta do robô enviada pelo serviço de envio, com "entregue" (10:57) e "lido" (11:00) vindos do contato em formato LID e aplicados no Chatwoot;
+  - sem ERROR nem panic na Evolution de teste; no conector, só os erros da subida (banco e RabbitMQ ainda não prontos).
+- Decisões tomadas: o pareamento aconteceu com o proxy global (sem session id) e o exclusivo entrou 8 min depois. Risco baixo, mas no próximo número cadastrar o proxy antes de ler o QR.
+- Pendências: observar 2–3 dias:
+  - mídia nos dois sentidos (foto, áudio, vídeo, documento);
+  - apagar para todos;
+  - quedas e reconexão;
+  - fila offline (`OfflineSyncCompleted`);
+  - contatos só com LID.
+  - Depois, decidir a migração das outras instâncias.
