@@ -226,3 +226,17 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Robô do n8n sem mudança: com o telefone garantido no conector, a causa some. O aviso ao administrador (backend XavierChat) cobre o que sobrar.
   - Não atribuir a conversa a agente: o robô atende primeiro (decisão do usuário).
 - Pendências: publicar a 0.7.2 (aprovação). A leitura de `whatsmeow_lid_map` na produção para confirmar o caso de 03/11 foi bloqueada pelo controle de leitura de produção (não feita).
+
+### 2026-11-03 — Claude — Aviso aos administradores quando o robô não responde um cliente novo
+- O que foi feito:
+  - `alerts/unansweredClients.ts` (commit `886aefe`): conversa aberta, sem agente, que **nunca teve resposta** e com o cliente esperando há 10 min → push "⚠️ Cliente sem resposta do robô" para os administradores ativos, uma vez por espera.
+    - Usa `alert: 'UNANSWERED_CLIENT_NO_AGENT'`; o toque abre a conversa.
+    - A migração 040 cria `admin_alerted_at` e a tabela `conversation_replies`, que guarda as conversas que já tiveram resposta.
+  - Conversa com resposta anterior fica de fora (encerramento natural do robô não vira alarme). Também usa `first_reply_created_at` do Chatwoot.
+  - 8 testes no arquivo (Postgres local), 451 no total.
+  - Imagem `xavierchat-api:robo-sem-resposta-20261103`.
+- Decisões tomadas:
+  - Caso de origem (03/11, WhatsApp 6): o contato nasceu sem telefone (LID) e o robô parou.
+  - Não atribuir a conversa a agente quando faltar telefone: o robô atende antes do agente (decisão do usuário).
+  - A causa foi corrigida no conector 0.7.2 (evolution-go).
+- Pendências: publicar a API (aprovação). Não muda o app (sem build iOS).
