@@ -78,7 +78,7 @@ func run(logger *slog.Logger) error {
 	chatwootService := service.NewChatwootService(
 		repo,
 		evolutionClient,
-		nil,
+		repository.NewWhatsmeowLIDResolver(db),
 		logging.New(logger),
 	)
 	proxyManager := proxymanager.New(proxymanager.NewGormRepository(db), evolutionClient, proxyRequired)
