@@ -206,3 +206,12 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
 - Pendências:
   - Usuário: proxy com session id novo e config do Chatwoot (conta 1, caixa 20) no conector de teste; só então conectar.
   - Depois: acompanhar 2–3 dias (envio, recebimento, mídia, apagar para todos, LID).
+
+### 2026-11-03 — Claude — Diagnóstico: cliente sem resposta (Marcelo Vianna, WhatsApp 6)
+- O que foi feito: o contato +5511953774844 (conversa 15013, caixa 8 "EvolutionMichele6", instância Michele6) mandou "Boa noite" às 08:34 UTC.
+  - 08:34:02: a mensagem chegou ilegível ("unavailable"); a whatsmeow pediu a cópia ao celular e gravou o LID→telefone em `whatsmeow_lid_map`.
+  - A cópia veio do celular sem `SenderAlt` e sem a troca LID→telefone. O conector esperou o período de carência e criou o contato só com `261370285142254@lid`, sem telefone.
+  - O robô (n8n WA, execução 983102) falhou no nó Postgres2 (upsert em `usuarios` por `sender.phone_number` nulo) e parou sem responder.
+  - 08:36:05: a mensagem decifrada chegou com o telefone, e o contato foi corrigido depois. O lembrete de cliente sem resposta não disparou porque a conversa não tinha agente.
+- Decisões tomadas: a causa é que o conector nasce com `lidResolver = nil`, então não consulta `whatsmeow_lid_map` (mesmo banco) quando o evento vem só com LID. O robô também não tolera telefone nulo.
+- Pendências: aprovação do usuário para ligar o `lidResolver` no conector (consulta a `whatsmeow_lid_map`), para fazer o robô tolerar telefone nulo e para responder ao cliente.
