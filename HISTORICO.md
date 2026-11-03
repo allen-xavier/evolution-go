@@ -240,3 +240,4 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Não atribuir a conversa a agente quando faltar telefone: o robô atende antes do agente (decisão do usuário).
   - A causa foi corrigida no conector 0.7.2 (evolution-go).
 - Pendências: publicar a API (aprovação). Não muda o app (sem build iOS).
+- Atualização (2026-11-03, autorizado pelo usuário: "pode publicar"): conector `0.7.2` publicado na stack 17 (linha da imagem). Rodando desde 10:45:22 UTC, consumidor do RabbitMQ conectado, sem erros.
