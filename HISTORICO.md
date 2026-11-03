@@ -196,3 +196,13 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
 - O que foi feito: licença do ambiente de teste ativada pelo usuário (`/license/status` = active).
 - Decisões tomadas: o usuário prefere não mexer na Michele14, que já tem Chatwoot, proxy e VPN configurados. O teste será com um número novo, numa caixa nova do Chatwoot ligada ao conector de teste; a produção não muda. No teste existe só o proxy global (PROXY_* copiados da stack 17). Os proxies por número da produção não foram copiados, e não devem ser, porque cada número tem IP próprio. O número novo precisa de um proxy exclusivo, cadastrado pelo usuário na tela de proxy do teste.
 - Pendências: o usuário providenciar o número e o proxy dele. Depois disso: criar a instância no teste, a caixa no Chatwoot e a config do conector; o usuário lê o QR.
+
+### 2026-11-03 — Claude — Instância TesteOficial e caixa do Chatwoot para o teste
+- O que foi feito:
+  - Instância `TesteOficial` (`a6b99eb2-fa92-4361-957a-c6fbcdaea4c7`) criada na stack de teste. Ao ser criada, ela recebeu o proxy global (PROXY_* sem session id).
+  - Caixa API "TesteOficial" (id 20) criada no Chatwoot, com webhook `https://evogo-teste.micheledeiansa.trade/chatwoot/webhook/a6b99eb2-fa92-4361-957a-c6fbcdaea4c7`. Criada pelo store do próprio app do Chatwoot, porque o formulário não respondia à automação.
+  - Não li os proxies por número da produção (credenciais).
+- Decisões tomadas: o proxy da produção é um só, e o IP exclusivo vem do session id no usuário do proxy. O usuário cadastra o proxy do TesteOficial com um session id novo na tela do conector de teste. A configuração do Chatwoot (token) também é feita pelo usuário. A conexão pode ser por código de pareamento (`/instance/pair`), sem ler QR.
+- Pendências:
+  - Usuário: proxy com session id novo e config do Chatwoot (conta 1, caixa 20) no conector de teste; só então conectar.
+  - Depois: acompanhar 2–3 dias (envio, recebimento, mídia, apagar para todos, LID).
