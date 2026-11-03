@@ -172,3 +172,22 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - `.gitattributes`: LF para `customizations/**/*.sh`, `*.patch` e workflows.
 - Decisões tomadas: a Michele14 é a instância de teste (usuário). Ela sai da produção antes de conectar no teste, para não haver duas sessões. O proxy exclusivo dela é configurado na tela de proxy do conector de teste (credencial com o usuário). Os riscos de comportamento do oficial (LID no envio, hash de mídia, JSON da blocklist) estão no README da migração.
 - Pendências: DNS `evogo-teste`; criar a stack de teste; desconectar a Michele14 da produção; o usuário configurar o proxy e ler o QR; apontar o webhook da caixa 12 do Chatwoot para o conector de teste; observar 2–3 dias. Publicar a v13 e o conector 0.7.1 em produção (aprovação). Ligar as Actions no fork.
+
+### 2026-11-03 — Claude — v13 e conector 0.7.1 em produção; ambiente de teste no ar
+- O que foi feito:
+  - Produção (stack 17, aprovação do usuário): `EVOLUTION_IMAGE` = `proxy-safety-v13-20261102` e conector `0.7.1`. Subiram às 09:52 UTC. As 9 instâncias conectadas voltaram com `Connected` e `OfflineSyncCompleted`, sem erros.
+  - DNS A `evogo-teste.micheledeiansa.trade` → 147.93.191.59, sem proxy. Criado no Cloudflare pelo Chrome; a tela carregou desta vez.
+  - Stack "evolution_go_teste" (Portainer id 23) com a imagem `whatsmeow-oficial-teste-20261102` e o conector 0.7.1:
+    - chaves e senhas novas e aleatórias (só no Portainer);
+    - PROXY_* copiados da stack 17.
+  - O RabbitMQ de teste não subia com 0.25 CPU (Erlang estrangulado). Passou para 0.50 CPU e 1024M (commit `d7e7317`).
+  - Evolution de teste e conector conectados ao RabbitMQ. `/license/status` = inactive (banco novo).
+  - GitHub Actions já estava ligado no fork. Disparei "Verificação quinzenal do whatsmeow" à mão (run 41614564864).
+  - Os workflows antigos "Build and Publish Docker Image" e "Publish Chatwoot connector image" falham em todo push. As imagens são publicadas localmente, então não afeta nada.
+- Decisões tomadas: não copiar a licença da produção para o teste (a licença é atrelada ao `instance_id`, e copiar arrisca a da produção). A ativação é feita pelo usuário no manager de teste. A Michele14 só sai da produção quando o usuário for ler o QR no teste.
+- Pendências:
+  - Usuário: ativar a licença em https://evogo-teste.micheledeiansa.trade/manager, configurar o proxy da Michele14 e ler o QR.
+  - Logo antes do QR: desconectar a Michele14 (`7ef3592b…`, 553121201708, caixa 12) da produção.
+  - Depois: configurar o Chatwoot no conector de teste e apontar o webhook da caixa 12.
+  - Ver o resultado do run 41614564864.
+  - Desligar ou consertar os workflows antigos de imagem.
