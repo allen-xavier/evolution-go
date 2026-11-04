@@ -257,3 +257,27 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - fila offline (`OfflineSyncCompleted`);
   - contatos só com LID.
   - Depois, decidir a migração das outras instâncias.
+
+### 2026-11-04 — Claude — Conector: vídeo "vermelho" no Chatwoot sem ter falhado (webhook assíncrono)
+- O que foi feito:
+  - Caso de origem: conversa 14644 (Raquel, WhatsApp 1). Vídeo mp4 de 1,2 MB enviado pela Carol em 03/11 às 23h43 ficou "falhou" com `Net::ReadTimeout`. Cinco minutos depois a cliente respondeu citando o vídeo, então ele foi entregue.
+  - Causa: o Chatwoot espera só 5 s pela resposta do webhook (`WEBHOOK_TIMEOUT`, `lib/webhooks/trigger.rb` v4.16.0) e, em caixa API, marca a mensagem como `failed` quando estoura. O conector só respondia depois de baixar o anexo, converter o vídeo e subi-lo ao WhatsApp pelo proxy.
+  - `internal/service/dispatch.go`:
+    - o webhook grava a mensagem como job de saída (com prazo de 2 min longe do worker de reenvio), responde na hora e envia em segundo plano;
+    - uma fila por conversa mantém a ordem das mensagens;
+    - o worker pula jobs em andamento;
+    - falha temporária fica para o reenvio, como antes;
+    - falha definitiva (número sem WhatsApp, arquivo recusado, 1 h sem entregar) agora marca a mensagem como `failed` no Chatwoot (PATCH com `external_error`), além da nota privada.
+  - Apagar no Chatwoot: mensagem ainda na fila não é enviada; mensagem que já está sendo enviada segue o caminho normal de apagar para todos.
+  - `main.go`: ao parar, espera os envios em andamento (até 15 s); o que não terminar é reenviado pelo próximo processo.
+  - Testes:
+    - 5 testes novos: resposta antes do envio lento, ordem, apagar na fila, vermelho só na falha definitiva, falha temporária sem vermelho;
+    - testes antigos esperam o envio em segundo plano;
+    - `go vet`, `go test ./...` e `go test -race ./...` ok (Go 1.25 em container).
+- Decisões tomadas:
+  - Não aumentar o `WEBHOOK_TIMEOUT` do Chatwoot: só adiaria o problema para vídeos maiores.
+  - Sem mudança na Evolution nem nas instâncias.
+- Pendências:
+  - Commit, push no `allen` e imagem `0.7.3` (aguardando aprovação).
+  - Atualizar a stack no Portainer (usuário).
+  - Depois do deploy, mandar um vídeo de teste e conferir que não fica vermelho.

@@ -77,6 +77,7 @@ func TestDeletedReplyIsDeletedForEveryoneOnWhatsApp(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 700, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 
 	want := []evolution.DeleteMessageRequest{
 		{Chat: deleteTestJID, MessageID: textID},
@@ -113,12 +114,14 @@ func TestDeletedReplyIsHandledOnce(t *testing.T) {
 		if err := service.HandleWebhook(deleteTestInstance, nil, body); err != nil {
 			t.Fatal(err)
 		}
+		waitOutbound(t, service)
 	}
 	// After a restart (empty cache) the receipt says it is already deleted.
 	restarted := NewChatwootService(repository, evolutionAPI, nil, testLoggerManager()).(*chatwootService)
 	if err := restarted.HandleWebhook(deleteTestInstance, nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, restarted)
 	if len(evolutionAPI.deleteCalls) != 1 {
 		t.Fatalf("expected one delete, got %#v", evolutionAPI.deleteCalls)
 	}
@@ -136,6 +139,7 @@ func TestDeletedReplyTooOldGetsNote(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 720, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(evolutionAPI.deleteCalls) != 0 {
 		t.Fatalf("a message older than the WhatsApp limit must not be revoked: %#v", evolutionAPI.deleteCalls)
 	}
@@ -153,6 +157,7 @@ func TestDeletedReplyWithoutLinkGetsNote(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 730, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(evolutionAPI.deleteCalls) != 0 {
 		t.Fatalf("unexpected delete calls: %#v", evolutionAPI.deleteCalls)
 	}
@@ -170,6 +175,7 @@ func TestDeletedReplyRefusedByWhatsAppGetsNote(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 740, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(evolutionAPI.deleteCalls) != 1 {
 		t.Fatalf("expected one delete attempt, got %#v", evolutionAPI.deleteCalls)
 	}
@@ -190,6 +196,7 @@ func TestDeletedMessageFromPhoneUsesSourceID(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(evolutionAPI.deleteCalls) != 1 || evolutionAPI.deleteCalls[0] != (evolution.DeleteMessageRequest{Chat: deleteTestJID, MessageID: "3EB0PHONE123"}) {
 		t.Fatalf("unexpected delete calls: %#v", evolutionAPI.deleteCalls)
 	}
@@ -204,6 +211,7 @@ func TestDeletedMessageFromPhoneUsesSourceID(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, old); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(evolutionAPI.deleteCalls) != 1 || len(notes.notes) != 1 || !strings.Contains(notes.notes[0], "prazo") {
 		t.Fatalf("old phone message: calls=%#v notes=%q", evolutionAPI.deleteCalls, notes.notes)
 	}
@@ -232,6 +240,7 @@ func TestMessageUpdatedIgnoresOtherChanges(t *testing.T) {
 		if err := service.HandleWebhook(deleteTestInstance, nil, body); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+		waitOutbound(t, service)
 	}
 
 	// Chatwoot integration disabled for the instance.
@@ -239,6 +248,7 @@ func TestMessageUpdatedIgnoresOtherChanges(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 764, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 
 	if len(evolutionAPI.deleteCalls) != 0 || len(notes.notes) != 0 {
 		t.Fatalf("expected nothing, got calls=%#v notes=%q", evolutionAPI.deleteCalls, notes.notes)
@@ -253,6 +263,7 @@ func TestDeletedReplyWaitingInQueueIsNotSent(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 260001, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	service.processOutboundJob(repository.jobs[job.ID])
 	if evolutionAPI.textCalls != 0 {
 		t.Fatalf("a deleted reply must not be sent, got %d sends", evolutionAPI.textCalls)
@@ -274,6 +285,7 @@ func TestDeletedReplyWaitingForDisconnectedNumberGetsNoNote(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 260001, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if stored := repository.jobs[job.ID]; stored == nil || stored.FailedAt == nil {
 		t.Fatalf("the queued reply should be cancelled: %#v", stored)
 	}
@@ -286,6 +298,7 @@ func TestDeletedReplyWaitingForDisconnectedNumberGetsNoNote(t *testing.T) {
 	if err := service.HandleWebhook(deleteTestInstance, nil, messageUpdatedWebhook(t, 780, nil)); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(notes.notes) != 1 || !strings.Contains(notes.notes[0], "desconectado") {
 		t.Fatalf("unexpected notes: %q", notes.notes)
 	}

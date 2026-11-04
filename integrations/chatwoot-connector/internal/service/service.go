@@ -35,6 +35,7 @@ type ChatwootService interface {
 	HandleWebhook(instanceID string, headers http.Header, body []byte) error
 	HandleEvolutionEvent(payload []byte) error
 	Run(ctx context.Context)
+	WaitOutbound(ctx context.Context) error
 }
 
 const (
@@ -116,7 +117,13 @@ type chatwootService struct {
 	identityLocks      [256]sync.Mutex
 	outboundRecoveryMu sync.Mutex
 	outboundRecovery   map[string]outboundRecoveryState
-	loggerWrapper      *logger_wrapper.Manager
+	// Background deliveries of webhook messages (dispatch.go): one lane per
+	// conversation; inflight maps instance:message to "sending started".
+	dispatchMu    sync.Mutex
+	dispatchWG    sync.WaitGroup
+	lanes         map[string][]func()
+	inflight      map[string]bool
+	loggerWrapper *logger_wrapper.Manager
 }
 
 type outboundRecoveryState struct {
@@ -430,44 +437,19 @@ func (s *chatwootService) HandleWebhook(instanceID string, headers http.Header, 
 		return nil
 	}
 
-	if err := s.deliverChatwootPayload(instanceID, cfg, payload); err != nil {
-		now := time.Now()
-		job := &chatwoot_model.ChatwootOutboundJob{
-			InstanceID:        instanceID,
-			ChatwootMessageID: chatwootMessageID,
-			Payload:           append([]byte(nil), body...),
-			NextAttemptAt:     now.Add(outboundNextRetryDelay(err, 0)),
-			LastError:         truncateText(err.Error(), 4000),
-		}
-		if isPermanentOutboundError(err) {
-			job.Attempts = 1
-			job.FailedAt = &now
-		} else {
-			s.maybeRecoverOutboundSession(instanceID, err)
-		}
-		if queueErr := s.repository.EnqueueOutboundJob(job); queueErr != nil {
-			s.webhookCache.Delete(webhookKey)
-			return fmt.Errorf("deliver Chatwoot message %s: %v (persist retry job: %w)", chatwootMessageID, err, queueErr)
-		}
-		if job.FailedAt != nil {
-			s.loggerWrapper.GetLogger(instanceID).LogError(
-				"[%s] Chatwoot message %s recorded as a terminal delivery failure: %v",
-				instanceID,
-				chatwootMessageID,
-				err,
-			)
-			s.notifyUndelivered(cfg, payload, err, false)
-			return nil
-		}
-		s.loggerWrapper.GetLogger(instanceID).LogWarn(
-			"[%s] Chatwoot message %s persisted for retry after delivery failure: %v",
-			instanceID,
-			chatwootMessageID,
-			err,
-		)
-		return nil
+	// Stored before answering, so a message is never lost if the connector stops
+	// before sending it (see dispatch.go).
+	job := &chatwoot_model.ChatwootOutboundJob{
+		InstanceID:        instanceID,
+		ChatwootMessageID: chatwootMessageID,
+		Payload:           append([]byte(nil), body...),
+		NextAttemptAt:     time.Now().Add(outboundInflightLease),
 	}
-	s.clearOutboundRecovery(instanceID)
+	if err := s.repository.EnqueueOutboundJob(job); err != nil {
+		s.webhookCache.Delete(webhookKey)
+		return fmt.Errorf("persist Chatwoot message %s: %w", chatwootMessageID, err)
+	}
+	s.dispatchOutbound(cfg, payload, job)
 
 	return nil
 }
@@ -664,6 +646,9 @@ func (s *chatwootService) processDueOutboundJobs(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if inflight, _ := s.inflightState(jobs[index].InstanceID, jobs[index].ChatwootMessageID); inflight {
+			continue
+		}
 		if s.processOutboundJob(&jobs[index]) {
 			// Let the instance finish reconnecting before processing more queued
 			// messages. The worker will pick them up on its next tick.
@@ -855,6 +840,11 @@ func (s *chatwootService) notifyUndelivered(
 		content = "❌ Resposta NÃO entregue ao cliente: o envio pelo WhatsApp falhou e foi interrompido. Se ainda fizer sentido, reenvie."
 	}
 	s.postPrivateNote(cfg, payload.Conversation.ID, cfg.InstanceID, withMessageExcerpt(content, payload.Content))
+	reason := "not delivered to WhatsApp"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	s.markChatwootMessageFailed(cfg, payload, reason)
 }
 
 func withMessageExcerpt(note string, message string) string {

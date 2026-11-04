@@ -1309,6 +1309,7 @@ func TestFailedChatwootSendIsPersistedAndRetried(t *testing.T) {
 	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
 		t.Fatalf("durably queued webhook should return success, got: %v", err)
 	}
+	waitOutbound(t, service)
 	if len(repository.jobs) != 1 {
 		t.Fatalf("expected one durable outbound job, got %d", len(repository.jobs))
 	}
@@ -1365,6 +1366,7 @@ func TestChatwootStartedConversationIsBoundAfterSend(t *testing.T) {
 	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(500, instanceID+":"+remoteJID)); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
+	waitOutbound(t, service)
 	if evolutionAPI.textCalls != 1 {
 		t.Fatalf("expected the message to be sent once, got %d", evolutionAPI.textCalls)
 	}
@@ -1403,6 +1405,7 @@ func TestChatwootStartedConversationTakesOverOldBinding(t *testing.T) {
 	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(501, instanceID+":"+remoteJID)); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
+	waitOutbound(t, service)
 	binding := repository.bindings[identityKey(instanceID, remoteJID)]
 	if binding == nil || binding.ID != 9 || binding.ConversationID != 501 {
 		t.Fatalf("existing binding should now point to conversation 501: %#v", binding)
@@ -1428,6 +1431,7 @@ func TestBoundConversationSendKeepsBindingAndFailedSendDoesNotBind(t *testing.T)
 	if err := service.HandleWebhook(instanceID, nil, chatwootStartedWebhook(502, instanceID+":"+remoteJID)); err != nil {
 		t.Fatalf("failed send should be queued, got: %v", err)
 	}
+	waitOutbound(t, service)
 	if len(repository.bindings) != 0 {
 		t.Fatalf("a failed send must not create a binding: %#v", repository.bindings)
 	}
@@ -1462,6 +1466,7 @@ func TestUnregisteredWhatsAppNumberIsRetainedWithoutRetry(t *testing.T) {
 	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if len(repository.jobs) != 1 {
 		t.Fatalf("terminal failure should remain for audit, got %d jobs", len(repository.jobs))
 	}
@@ -1577,6 +1582,7 @@ func TestHandleWebhookSkipsMirroredWhatsAppOutgoingMessage(t *testing.T) {
 	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if evolutionAPI.textCalls != 0 {
 		t.Fatalf("mirrored WhatsApp message was sent back to WhatsApp %d times", evolutionAPI.textCalls)
 	}
@@ -1651,6 +1657,7 @@ func TestMirroredChatwootResponseIDStopsEchoWhenWebhookOmitsSourceID(t *testing.
 	if err := service.HandleWebhook(instanceID, nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if evolutionAPI.textCalls != 0 {
 		t.Fatalf("remembered mirrored message was sent back to WhatsApp %d times", evolutionAPI.textCalls)
 	}
@@ -2195,6 +2202,7 @@ func TestDisconnectedInstanceIsNotAskedToSend(t *testing.T) {
 	if err := service.HandleWebhook("eef4c22f-766f-4c77-a376-52219f57adfc", nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if evolutionAPI.textCalls != 0 {
 		t.Fatalf("a disconnected instance must not be asked to send (it would enter the QR flow), got %d calls", evolutionAPI.textCalls)
 	}
@@ -2289,7 +2297,18 @@ func TestPrivateDeliveryNoteWebhookIsNotSentToWhatsApp(t *testing.T) {
 	if err := service.HandleWebhook("eef4c22f-766f-4c77-a376-52219f57adfc", nil, body); err != nil {
 		t.Fatal(err)
 	}
+	waitOutbound(t, service)
 	if evolutionAPI.textCalls != 0 {
 		t.Fatalf("private notes must never reach the customer, got %d sends", evolutionAPI.textCalls)
+	}
+}
+
+// waitOutbound waits for the background deliveries started by HandleWebhook.
+func waitOutbound(t *testing.T, service *chatwootService) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.WaitOutbound(ctx); err != nil {
+		t.Fatalf("background deliveries did not finish: %v", err)
 	}
 }

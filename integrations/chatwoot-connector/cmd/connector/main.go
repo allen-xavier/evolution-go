@@ -125,7 +125,11 @@ func run(logger *slog.Logger) error {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return server.Shutdown(shutdownCtx)
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if err := chatwootService.WaitOutbound(shutdownCtx); err != nil {
+		logger.Warn("stopped with Chatwoot messages still being sent; they will be retried", "error", err)
+	}
+	return shutdownErr
 }
 
 func migrateLegacyBindings(db *gorm.DB) error {

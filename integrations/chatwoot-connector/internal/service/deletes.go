@@ -272,6 +272,12 @@ func (s *chatwootService) handleChatwootMessageUpdated(
 // cancelWaitingReply closes the retry job of a reply that has not reached
 // WhatsApp yet, and reports whether there was one.
 func (s *chatwootService) cancelWaitingReply(instanceID string, chatwootMessageID string) bool {
+	// A message just received from the webhook is handled by its lane: still
+	// queued, the lane drops it (the deletion is already recorded); already being
+	// sent, it may reach WhatsApp and follows the normal revoke path.
+	if inflight, started := s.inflightState(instanceID, chatwootMessageID); inflight {
+		return !started
+	}
 	job, err := s.repository.GetPendingOutboundJob(instanceID, chatwootMessageID)
 	if err != nil {
 		s.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Could not look up queued reply %s: %v", instanceID, chatwootMessageID, err)
