@@ -281,3 +281,11 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Commit, push no `allen` e imagem `0.7.3` (aguardando aprovação).
   - Atualizar a stack no Portainer (usuário).
   - Depois do deploy, mandar um vídeo de teste e conferir que não fica vermelho.
+- Atualização (2026-11-04, autorizado pelo usuário: "pode publicar e atualizar a stack no portainer"):
+  - Commit `baef8d1` enviado para o `allen`.
+  - Imagem `0.7.3` gerada localmente e enviada ao GHCR (`sha256:c762aeac…`).
+  - Stack 17 (`evolution_go`) atualizada pelo Chrome do usuário: só a linha da imagem do conector mudou, sem prune e sem pull das outras imagens. A Evolution não reiniciou.
+  - Conector rodando desde 14:43:33 UTC, HTTP e consumidor do RabbitMQ conectados.
+  - Primeira mensagem do Chatwoot (441074) passou pelo novo envio às 14:46 sem erro nem reenvio.
+  - Falta: um vídeo real enviado pelo Chatwoot sem ficar vermelho.
+  - A stack de teste (`evolution_go_teste`) continua com o conector 0.7.1.
