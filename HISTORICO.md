@@ -289,3 +289,13 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Primeira mensagem do Chatwoot (441074) passou pelo novo envio às 14:46 sem erro nem reenvio.
   - Falta: um vídeo real enviado pelo Chatwoot sem ficar vermelho.
   - A stack de teste (`evolution_go_teste`) continua com o conector 0.7.1.
+
+### 2026-11-05 — Claude — Por que a mensagem do watchdog parou de chegar nos WhatsApp
+- O que foi feito:
+  - Pergunta do usuário: a mensagem do watchdog parou de chegar nos WhatsApp, no Evolution original e no de teste.
+  - Causa: o watchdog antigo (até o conector 0.6.9) mandava a cada 15 min uma mensagem `[connector-watchdog]` para o próprio número. Ela foi retirada no conector 0.7.0 (commit `14f62a8`), publicado em 02/11 às 21:07 UTC. A stack de teste roda o 0.7.1, então também não manda mais.
+  - Motivo da retirada: essa mensagem não provava nada. Ela era "confirmada" pelo próprio evento de envio, e a mensagem para o próprio número nunca volta ao aparelho. Em 02/11 o WhatsApp 1 ficou 3 h travado com o teste dando "ok".
+  - O watchdog continua ligado nos dois bancos (`watchdog_enabled=true`, URL do webhook definida). Agora ele observa em silêncio e só avisa quando há problema: ≥ 3 envios para ≥ 2 conversas sem nada voltar em 15 min. O aviso vai para o log (regra do Grafana → Telegram) e para o webhook.
+  - Nos últimos 4 dias o conector original não registrou nenhum alerta do watchdog.
+- Decisões tomadas: nada mudou; resposta ao usuário.
+- Pendências: se o usuário quiser um sinal visível de "estou vivo", criar um resumo diário no Telegram ou no WhatsApp. Não voltar a usar a mensagem de 15 min.
