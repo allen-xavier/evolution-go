@@ -299,3 +299,17 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Nos últimos 4 dias o conector original não registrou nenhum alerta do watchdog.
 - Decisões tomadas: nada mudou; resposta ao usuário.
 - Pendências: se o usuário quiser um sinal visível de "estou vivo", criar um resumo diário no Telegram ou no WhatsApp. Não voltar a usar a mensagem de 15 min.
+
+### 2026-11-14 — Claude — Balanço do teste do whatsmeow oficial (TesteOficial, 03–12/11)
+- O que foi feito (só leitura: logs da stack `evolution_go_teste` pelo `portainer.mjs`, Chatwoot pelo n8n com fluxo temporário arquivado `jKRtBxQwl5xkyFiN`):
+  - Linha do tempo (UTC): pareou 03/11 10:24; "403: primary device was logged out" 03/11 17:47 (7 h depois, sem pedido nosso; o proxy exclusivo entrou 8 min depois do pareamento, o que pode ter pesado); pareou de novo 04/11 09:59 e ficou até 12/11 20:08, quando o usuário tirou o número. Em 14/11 13:52 o número 553134001439 foi pareado na produção como Michele4 (`a5cd7d74…`), com proxy fail-closed, recebendo mensagens.
+  - Sem panic nem ERROR na Evolution de teste em 11 dias; 378 WARN, todos inofensivos (webhook desligado, eventos sem tratamento).
+  - 75 quedas, todas "websocket: failed to read frame header: EOF"; 74 voltaram sozinhas (mediana 18 s). A produção tem o mesmo padrão (5 a 10 por número nas últimas 24 h).
+  - 28 mensagens "Undecryptable": as 28 chegaram decifradas em seguida. Produção, 24 h: 62, das quais 2 sem recuperação visível.
+  - API: 711 `/send/text` e 31 `/send/media` todos 200; 3 `/user/check` 200; 2 `/message/delete` 200. Os 404 são robôs de varredura no host público `evogo-teste`.
+  - Chatwoot caixa 20: 53 conversas, 747 recebidas e 747 enviadas, nenhuma com falha; fotos (25 recebidas, 27 enviadas), áudios (11/4) e documentos (6 recebidos). Nenhum vídeo passou pelo teste.
+  - Conector de teste (0.7.1): os únicos ERROR depois da subida são mensagens enviadas pela caixa 20 com o número já fora (438107 em 03/11; 460834 e 461261 em 12/11, escritas em conversas antigas depois que o cliente já estava em outra caixa) e duas apagadas antes do envio.
+  - O tulir/whatsmeow tem 19 commits depois do sha testado (`5403881`), até 13/11 (reconexão/keepalive, app state, recibos).
+  - Produção: a Evolution (`proxy-safety-v13-20261102`, limite 1 GB) teve 3 tarefas encerradas com código 137, a última em 07/11 20:35 UTC (não investigado).
+- Decisões tomadas: só relatório. Recomendado subir na produção exatamente a imagem testada (`whatsmeow-oficial-teste-20261102`), mantendo o conector 0.7.3, e deixar os 19 commits novos para a rotina quinzenal com novo teste. Volta: trocar a imagem de novo para `proxy-safety-v13-20261102` (banco v16 é aberto pelo fork).
+- Pendências: aprovação do usuário para trocar a imagem da stack 17; depois, mandar um vídeo de teste; desligar a stack `evolution_go_teste` quando a produção estiver estável.
