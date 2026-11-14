@@ -319,3 +319,4 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Duas respostas do Chatwoot enviadas durante a troca (465590 Michele13, 465591 Michele2) ficaram para reenvio e saíram às 14:28, com "entregue" e "lido".
   - A instância `b0d168c7…` (553134001438) não voltou porque já estava deslogada desde 13:30 UTC (LoggedOut antes da troca).
 - Pendências: o usuário decidir se reconecta o 553134001438 por QR; mandar um vídeo de teste; desligar a stack `evolution_go_teste` depois de alguns dias estáveis; levar os 19 commits novos do tulir pela rotina quinzenal com novo teste. Volta, se precisar: `EVOLUTION_IMAGE` = `proxy-safety-v13-20261102`.
+- Atualização (2026-11-14, aprovado pelo usuário): stack `evolution_go_teste` (Portainer 23) removida às 14:53 UTC, volumes mantidos; o XavierChat não consulta mais o conector de teste (`EVOLUTION_CONNECTOR_2_*` removidas da stack 18). TesteOficial marcado "Não usar" no app pelo usuário.
