@@ -313,3 +313,9 @@ Fonte: conversas do Codex com cwd nesta pasta (banco `state_5.sqlite` / `thread_
   - Produção: a Evolution (`proxy-safety-v13-20261102`, limite 1 GB) teve 3 tarefas encerradas com código 137, a última em 07/11 20:35 UTC (não investigado).
 - Decisões tomadas: só relatório. Recomendado subir na produção exatamente a imagem testada (`whatsmeow-oficial-teste-20261102`), mantendo o conector 0.7.3, e deixar os 19 commits novos para a rotina quinzenal com novo teste. Volta: trocar a imagem de novo para `proxy-safety-v13-20261102` (banco v16 é aberto pelo fork).
 - Pendências: aprovação do usuário para trocar a imagem da stack 17; depois, mandar um vídeo de teste; desligar a stack `evolution_go_teste` quando a produção estiver estável.
+- Atualização (2026-11-14, usuário: "Pode trocar agora"):
+  - Stack 17 (`evolution_go`), pelo Chrome do usuário: só a variável `EVOLUTION_IMAGE`, de `proxy-safety-v13-20261102` para `whatsmeow-oficial-teste-20261102` (mesmo arquivo, Prune e PullImage desligados; conector 0.7.3 sem mudança). A stack não tem `update_config`, então o Swarm para a antiga antes de subir a nova.
+  - Nova Evolution no ar às 14:27:14 UTC ("Running auto-migration"); os 11 números que estavam conectados voltaram entre 14:27:18 e 14:27:47 com `Connected` e `OfflineSyncCompleted`. Sem panic nem ERROR.
+  - Duas respostas do Chatwoot enviadas durante a troca (465590 Michele13, 465591 Michele2) ficaram para reenvio e saíram às 14:28, com "entregue" e "lido".
+  - A instância `b0d168c7…` (553134001438) não voltou porque já estava deslogada desde 13:30 UTC (LoggedOut antes da troca).
+- Pendências: o usuário decidir se reconecta o 553134001438 por QR; mandar um vídeo de teste; desligar a stack `evolution_go_teste` depois de alguns dias estáveis; levar os 19 commits novos do tulir pela rotina quinzenal com novo teste. Volta, se precisar: `EVOLUTION_IMAGE` = `proxy-safety-v13-20261102`.
